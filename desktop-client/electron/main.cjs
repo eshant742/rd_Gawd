@@ -109,8 +109,8 @@ function createTrayIcon() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 720,
+    width: isHostMode ? 400 : 1280,
+    height: isHostMode ? 300 : 720,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -120,6 +120,8 @@ function createWindow() {
     title: 'Antigravity Remote Desktop',
     show: !isHostMode // Hidden if host mode
   });
+
+  mainWindow.webContents.openDevTools();
 
   const isDev = !app.isPackaged && process.env.VITE_DEV_SERVER_URL;
   if (isDev) {

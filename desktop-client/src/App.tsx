@@ -426,6 +426,11 @@ function App() {
     
     try {
       const pc = await setupPeerConnection(socketRef.current, targetId, false);
+      
+      // CRITICAL FIX: The viewer must explicitly tell WebRTC it wants to receive video.
+      // Otherwise, the created offer has no media sections, and the Host's video track is ignored!
+      pc.addTransceiver('video', { direction: 'recvonly' });
+      
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       
