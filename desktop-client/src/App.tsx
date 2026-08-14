@@ -43,6 +43,7 @@ function App() {
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const localStream = useRef<MediaStream | null>(null);
   const connectionTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
@@ -70,6 +71,7 @@ function App() {
     if (remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = null;
     }
+    remoteStreamRef.current = null;
     
     pendingCandidatesRef.current = [];
     setStatus("disconnected");
@@ -115,12 +117,17 @@ function App() {
 
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.track.kind);
-      if (remoteVideoRef.current && event.track) {
+      if (event.track) {
         // Create a new stream from the track if event.streams is empty or reliable
         const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
         
-        if (remoteVideoRef.current.srcObject !== stream) {
-          console.log("Setting remote video stream to video element");
+        // Save the stream in a ref because the <video> element might not be mounted yet!
+        // (It only mounts when ICE state becomes "connected")
+        remoteStreamRef.current = stream;
+        
+        // If it IS mounted, set it immediately
+        if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
+          console.log("Setting remote video stream to video element immediately");
           remoteVideoRef.current.srcObject = stream;
         }
       }
@@ -553,6 +560,17 @@ function App() {
   }
 
   // ──── VIEWER - CONNECTED VIEW ────
+  
+  // Attach stream when video element mounts
+  useEffect(() => {
+    if (status === "connected" && appMode === "viewer" && remoteVideoRef.current && remoteStreamRef.current) {
+      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+        console.log("Setting remote video stream to video element on mount");
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+    }
+  }, [status, appMode]);
+
   if (status === "connected" && appMode === "viewer") {
     return (
       <div
