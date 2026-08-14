@@ -1,8 +1,12 @@
 const express = require('express');
+const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
+
+// Enable CORS for all routes — required for browser connections from Vercel
+app.use(cors());
 
 // Health check endpoint — critical for Render/Railway to keep the service alive
 app.get('/', (req, res) => {
@@ -22,8 +26,11 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST'],
+    credentials: true
   },
+  allowEIO3: true,
+  transports: ['polling', 'websocket'],
   // Increase timeouts for better stability
   pingTimeout: 60000,
   pingInterval: 25000

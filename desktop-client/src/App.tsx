@@ -265,10 +265,11 @@ function App() {
       const signalingUrl = import.meta.env.VITE_SIGNALING_URL || "http://localhost:3001";
       const newSocket = io(signalingUrl, {
         reconnection: true,
-        reconnectionAttempts: 10,
+        reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
-        timeout: 10000,
+        timeout: 30000,
+        transports: ['polling', 'websocket'],
       });
       
       socketRef.current = newSocket;
