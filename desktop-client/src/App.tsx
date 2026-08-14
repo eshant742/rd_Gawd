@@ -113,6 +113,17 @@ function App() {
     const pc = new RTCPeerConnection(iceServers);
     peerConnection.current = pc;
 
+    pc.ontrack = (event) => {
+      console.log("Received remote track:", event.track.kind);
+      if (remoteVideoRef.current && event.streams && event.streams[0]) {
+        // Only set the srcObject if it's different to avoid interrupting playback
+        if (remoteVideoRef.current.srcObject !== event.streams[0]) {
+          console.log("Setting remote video stream to video element");
+          remoteVideoRef.current.srcObject = event.streams[0];
+        }
+      }
+    };
+
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         sock.emit("ice-candidate", {
