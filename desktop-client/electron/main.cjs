@@ -121,8 +121,6 @@ function createWindow() {
     show: !isHostMode // Hidden if host mode
   });
 
-  mainWindow.webContents.openDevTools();
-
   const isDev = !app.isPackaged && process.env.VITE_DEV_SERVER_URL;
   if (isDev) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);

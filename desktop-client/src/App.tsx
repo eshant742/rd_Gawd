@@ -115,11 +115,13 @@ function App() {
 
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.track.kind);
-      if (remoteVideoRef.current && event.streams && event.streams[0]) {
-        // Only set the srcObject if it's different to avoid interrupting playback
-        if (remoteVideoRef.current.srcObject !== event.streams[0]) {
+      if (remoteVideoRef.current && event.track) {
+        // Create a new stream from the track if event.streams is empty or reliable
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        
+        if (remoteVideoRef.current.srcObject !== stream) {
           console.log("Setting remote video stream to video element");
-          remoteVideoRef.current.srcObject = event.streams[0];
+          remoteVideoRef.current.srcObject = stream;
         }
       }
     };
