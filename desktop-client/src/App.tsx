@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
-import { Key, MonitorPlay, XCircle } from "lucide-react";
+import { Key, MonitorPlay, XCircle, Copy, Check, Loader2, WifiOff, Wifi } from "lucide-react";
 
-const iceServers = {
+const iceServers: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
     { urls: "stun:global.stun.twilio.com:3478" },
     {
       urls: "turn:openrelay.metered.ca:80",
@@ -22,194 +24,58 @@ const iceServers = {
       credential: "openrelayproject"
     }
   ],
+  iceCandidatePoolSize: 10,
 };
 
+// Connection timeout in milliseconds
+const CONNECTION_TIMEOUT = 20000;
+
 function App() {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [myId, setMyId] = useState<string>("");
   const [targetId, setTargetId] = useState<string>("");
   const [status, setStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
   const [appMode, setAppMode] = useState<"host" | "viewer" | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [signalingConnected, setSignalingConnected] = useState(false);
 
+  const socketRef = useRef<Socket | null>(null);
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStream = useRef<MediaStream | null>(null);
+  const connectionTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const modeRef = useRef<string>("viewer");
 
-  useEffect(() => {
-    // Determine mode and setup automatically if host
-    async function initMode() {
-      let mode = 'viewer'; // Default to viewer if no Electron
-
-      // Connect to signaling server
-      const signalingUrl = import.meta.env.VITE_SIGNALING_URL || "http://localhost:3001";
-      const newSocket = io(signalingUrl);
-      setSocket(newSocket);
-
-      // @ts-ignore
-      if (window.electronAPI) {
-        // @ts-ignore
-        mode = await window.electronAPI.getMode();
-        setAppMode(mode as "host" | "viewer");
-        
-        if (mode === 'host') {
-          // @ts-ignore
-          const permId = await window.electronAPI.getPermanentId();
-          setMyId(permId);
-          newSocket.emit('join-room', permId); // Host registers their permanent ID as a room
-        }
-      } else {
-        setAppMode('viewer');
-      }
-
-      newSocket.on("offer", async (data: { sender: string; offer: RTCSessionDescriptionInit }) => {
-        console.log("Received offer from", data.sender);
-        if (mode === 'viewer') return; // Viewers don't accept offers in this setup
-
-        setStatus("connecting");
-        try {
-          await setupPeerConnection(newSocket, data.sender, true);
-          await peerConnection.current?.setRemoteDescription(new RTCSessionDescription(data.offer));
-          
-          // Add any queued candidates (if ICE candidates arrived before remote description was set)
-          while (pendingCandidates.length > 0) {
-            const candidate = pendingCandidates.shift();
-            if (candidate) {
-              try {
-                await peerConnection.current?.addIceCandidate(new RTCIceCandidate(candidate));
-              } catch (e) {
-                console.error("Error adding queued ice candidate on host", e);
-              }
-            }
-          }
-          
-          const answer = await peerConnection.current?.createAnswer();
-          await peerConnection.current?.setLocalDescription(answer);
-          
-          newSocket.emit("answer", {
-            target: data.sender,
-            answer: answer
-          });
-        } catch (err) {
-          console.error("Failed to handle offer", err);
-          cleanupSession();
-        }
-      });
-
-      const pendingCandidates: RTCIceCandidateInit[] = [];
-
-      newSocket.on("answer", async (data: { sender: string; answer: RTCSessionDescriptionInit }) => {
-        console.log("Received answer from", data.sender);
-        await peerConnection.current?.setRemoteDescription(new RTCSessionDescription(data.answer));
-        setStatus("connected");
-        
-        // Add any queued candidates
-        while (pendingCandidates.length > 0) {
-          const candidate = pendingCandidates.shift();
-          if (candidate) {
-            try {
-              await peerConnection.current?.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (e) {
-              console.error("Error adding queued ice candidate", e);
-            }
-          }
-        }
-      });
-
-      newSocket.on("ice-candidate", async (data: { sender: string; candidate: RTCIceCandidateInit }) => {
-        console.log("Received ICE candidate");
-        if (!peerConnection.current || !peerConnection.current.remoteDescription) {
-          console.log("Queueing ICE candidate because remote description is not set yet");
-          pendingCandidates.push(data.candidate);
-          return;
-        }
-        try {
-          await peerConnection.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {
-          console.error("Error adding ice candidate", e);
-        }
-      });
+  const cleanupSession = useCallback(() => {
+    // Clear connection timeout
+    if (connectionTimeout.current) {
+      clearTimeout(connectionTimeout.current);
+      connectionTimeout.current = null;
     }
 
-    initMode();
-
-    return () => {
-      if (socket) socket.disconnect();
-    };
+    if (localStream.current) {
+      localStream.current.getTracks().forEach(t => t.stop());
+      localStream.current = null;
+    }
+    if (peerConnection.current) {
+      peerConnection.current.close();
+      peerConnection.current = null;
+    }
+    if (dataChannel.current) {
+      dataChannel.current.close();
+      dataChannel.current = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+    
+    pendingCandidatesRef.current = [];
+    setStatus("disconnected");
   }, []);
 
-  const setupPeerConnection = async (sock: Socket, target: string, asHost: boolean) => {
-    const pc = new RTCPeerConnection(iceServers);
-    peerConnection.current = pc;
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        sock.emit("ice-candidate", {
-          target: target,
-          candidate: event.candidate,
-        });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log("Connection state:", pc.connectionState);
-      if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-        cleanupSession();
-      }
-    };
-
-    if (asHost) {
-      try {
-        // @ts-ignore
-        const sources = await window.electronAPI.getSources();
-        const primaryScreen = sources.find((s: any) => s.id.startsWith('screen')) || sources[0];
-        
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: primaryScreen.id,
-              maxFrameRate: 60
-            }
-          } as any
-        });
-        
-        localStream.current = stream;
-        stream.getTracks().forEach((track) => {
-          pc.addTrack(track, stream);
-        });
-
-        pc.ondatachannel = (event) => {
-          const channel = event.channel;
-          channel.onmessage = (e) => {
-            try {
-              const cmd = JSON.parse(e.data);
-              handleRemoteCommand(cmd);
-            } catch (err) {
-              console.error("Error parsing command", err);
-            }
-          };
-        };
-      } catch (err) {
-        console.error("Error getting display media", err);
-        throw err;
-      }
-    } else {
-      pc.ontrack = (event) => {
-        console.log("Received remote track");
-        if (remoteVideoRef.current && event.streams[0]) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-        }
-      };
-
-      const dc = pc.createDataChannel("control");
-      dataChannel.current = dc;
-    }
-  };
-
-  const handleRemoteCommand = (cmd: any) => {
+  const handleRemoteCommand = useCallback((cmd: any) => {
     // @ts-ignore
     if (!window.electronAPI) return;
     try {
@@ -228,68 +94,363 @@ function App() {
       } else if (cmd.type === "keyup") {
         // @ts-ignore
         window.electronAPI.keyUp(cmd.key);
+      } else if (cmd.type === "scroll") {
+        // @ts-ignore
+        window.electronAPI.scrollWheel(cmd.deltaX, cmd.deltaY);
       }
     } catch (e) {
       console.error("Failed to execute command", e);
     }
-  };
+  }, []);
 
-  const connectToPeer = async () => {
-    if (!socket || !targetId) return;
-    setStatus("connecting");
-    
-    try {
-      // Connect to the host's room first so they get our signals (if needed by signaling logic, or we just emit directly)
-      // Actually our signaling server relays by socket.id. But if host is in a room named targetId, 
-      // we need the signaling server to route to that room.
-      // Wait, our signaling server routes 'offer' to `target`. If target is a room ID, socket.to(target) works!
-      await setupPeerConnection(socket, targetId, false);
-      const offer = await peerConnection.current?.createOffer();
-      await peerConnection.current?.setLocalDescription(offer);
-      
-      socket.emit("offer", {
-        target: targetId,
-        offer: offer
-      });
-    } catch (err) {
-      console.error("Connection failed", err);
-      setErrorMsg("Failed to connect.");
-      cleanupSession();
-    }
-  };
-
-  const cleanupSession = () => {
-    if (localStream.current) {
-      localStream.current.getTracks().forEach(t => t.stop());
-      localStream.current = null;
-    }
+  const setupPeerConnection = useCallback(async (sock: Socket, target: string, asHost: boolean) => {
+    // Clean up any existing peer connection first
     if (peerConnection.current) {
       peerConnection.current.close();
       peerConnection.current = null;
     }
-    if (dataChannel.current) {
-      dataChannel.current.close();
-      dataChannel.current = null;
+
+    const pc = new RTCPeerConnection(iceServers);
+    peerConnection.current = pc;
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        sock.emit("ice-candidate", {
+          target: target,
+          candidate: event.candidate.toJSON(),
+        });
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log("ICE connection state:", pc.iceConnectionState);
+      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        // Clear the connection timeout — we're connected!
+        if (connectionTimeout.current) {
+          clearTimeout(connectionTimeout.current);
+          connectionTimeout.current = null;
+        }
+        setStatus("connected");
+      } else if (pc.iceConnectionState === "failed") {
+        console.error("ICE connection failed");
+        setErrorMsg("Connection failed. The remote peer may be behind a strict firewall.");
+        cleanupSession();
+      } else if (pc.iceConnectionState === "disconnected") {
+        console.warn("ICE disconnected — waiting for reconnection...");
+        // Give it a few seconds to reconnect before cleaning up
+        setTimeout(() => {
+          if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+            console.error("ICE did not reconnect, cleaning up.");
+            cleanupSession();
+          }
+        }, 5000);
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log("Connection state:", pc.connectionState);
+      if (pc.connectionState === "failed") {
+        setErrorMsg("Peer connection failed.");
+        cleanupSession();
+      }
+    };
+
+    if (asHost) {
+      try {
+        // @ts-ignore
+        const sources = await window.electronAPI.getSources();
+        
+        if (!sources || sources.length === 0) {
+          throw new Error("No screen sources found. Make sure screen recording permissions are granted.");
+        }
+        
+        const primaryScreen = sources.find((s: any) => s.id.startsWith('screen')) || sources[0];
+        console.log("Capturing screen:", primaryScreen.name, primaryScreen.id);
+        
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: primaryScreen.id,
+              minWidth: 1280,
+              minHeight: 720,
+              maxFrameRate: 30
+            }
+          } as any
+        });
+        
+        localStream.current = stream;
+        
+        // Verify we actually have video tracks
+        const videoTracks = stream.getVideoTracks();
+        if (videoTracks.length === 0) {
+          throw new Error("No video tracks in captured stream");
+        }
+        console.log("Captured video track:", videoTracks[0].label, "enabled:", videoTracks[0].enabled);
+        
+        stream.getTracks().forEach((track) => {
+          pc.addTrack(track, stream);
+        });
+
+        // Set encoding parameters for better quality
+        const senders = pc.getSenders();
+        for (const sender of senders) {
+          if (sender.track?.kind === 'video') {
+            const params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) {
+              params.encodings = [{}];
+            }
+            params.encodings[0].maxBitrate = 5000000; // 5 Mbps
+            params.encodings[0].maxFramerate = 30;
+            try {
+              await sender.setParameters(params);
+            } catch (e) {
+              console.warn("Could not set encoding params:", e);
+            }
+          }
+        }
+
+        pc.ondatachannel = (event) => {
+          const channel = event.channel;
+          channel.onmessage = (e) => {
+            try {
+              const cmd = JSON.parse(e.data);
+              handleRemoteCommand(cmd);
+            } catch (err) {
+              console.error("Error parsing command", err);
+            }
+          };
+          channel.onopen = () => console.log("Data channel opened (host side)");
+          channel.onclose = () => console.log("Data channel closed (host side)");
+        };
+      } catch (err) {
+        console.error("Error getting display media", err);
+        throw err;
+      }
+    } else {
+      // Viewer side
+      pc.ontrack = (event) => {
+        console.log("Received remote track:", event.track.kind, "streams:", event.streams.length);
+        if (remoteVideoRef.current && event.streams[0]) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+          
+          // Force play as a fallback
+          remoteVideoRef.current.play().catch(err => {
+            console.warn("Auto-play failed, will retry:", err);
+          });
+        }
+      };
+
+      const dc = pc.createDataChannel("control", {
+        ordered: true
+      });
+      dataChannel.current = dc;
+      
+      dc.onopen = () => console.log("Data channel opened (viewer side)");
+      dc.onclose = () => console.log("Data channel closed (viewer side)");
+      dc.onerror = (err) => console.error("Data channel error:", err);
     }
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = null;
+
+    return pc;
+  }, [cleanupSession, handleRemoteCommand]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initMode() {
+      let mode = 'viewer'; // Default to viewer if no Electron
+
+      // Connect to signaling server with reconnection
+      const signalingUrl = import.meta.env.VITE_SIGNALING_URL || "http://localhost:3001";
+      const newSocket = io(signalingUrl, {
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 10000,
+      });
+      
+      socketRef.current = newSocket;
+
+      newSocket.on("connect", () => {
+        console.log("Connected to signaling server, socket id:", newSocket.id);
+        if (isMounted) setSignalingConnected(true);
+        
+        // Re-join room on reconnect (important!)
+        if (modeRef.current === 'host' && myId) {
+          newSocket.emit('join-room', myId);
+        }
+      });
+
+      newSocket.on("disconnect", (reason) => {
+        console.warn("Disconnected from signaling server:", reason);
+        if (isMounted) setSignalingConnected(false);
+      });
+
+      newSocket.on("connect_error", (err) => {
+        console.error("Signaling connection error:", err.message);
+        if (isMounted) setSignalingConnected(false);
+      });
+
+      // @ts-ignore
+      if (window.electronAPI) {
+        // @ts-ignore
+        mode = await window.electronAPI.getMode();
+        modeRef.current = mode;
+        if (isMounted) setAppMode(mode as "host" | "viewer");
+        
+        if (mode === 'host') {
+          // @ts-ignore
+          const permId = await window.electronAPI.getPermanentId();
+          if (isMounted) setMyId(permId);
+          newSocket.emit('join-room', permId); // Host registers their permanent ID as a room
+        }
+      } else {
+        modeRef.current = 'viewer';
+        if (isMounted) setAppMode('viewer');
+      }
+
+      // Handle incoming offer (host receives this)
+      newSocket.on("offer", async (data: { sender: string; offer: RTCSessionDescriptionInit }) => {
+        console.log("Received offer from", data.sender);
+        if (modeRef.current === 'viewer') return; // Viewers don't accept offers
+
+        if (isMounted) setStatus("connecting");
+        try {
+          const pc = await setupPeerConnection(newSocket, data.sender, true);
+          await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+          
+          // Add any queued candidates
+          while (pendingCandidatesRef.current.length > 0) {
+            const candidate = pendingCandidatesRef.current.shift();
+            if (candidate) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                console.error("Error adding queued ice candidate on host", e);
+              }
+            }
+          }
+          
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          
+          newSocket.emit("answer", {
+            target: data.sender,
+            answer: answer
+          });
+        } catch (err) {
+          console.error("Failed to handle offer", err);
+          cleanupSession();
+        }
+      });
+
+      // Handle incoming answer (viewer receives this)
+      newSocket.on("answer", async (data: { sender: string; answer: RTCSessionDescriptionInit }) => {
+        console.log("Received answer from", data.sender);
+        try {
+          await peerConnection.current?.setRemoteDescription(new RTCSessionDescription(data.answer));
+          
+          // Add any queued candidates
+          while (pendingCandidatesRef.current.length > 0) {
+            const candidate = pendingCandidatesRef.current.shift();
+            if (candidate) {
+              try {
+                await peerConnection.current?.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                console.error("Error adding queued ice candidate", e);
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Error setting remote description from answer:", err);
+        }
+      });
+
+      // Handle ICE candidates
+      newSocket.on("ice-candidate", async (data: { sender: string; candidate: RTCIceCandidateInit }) => {
+        if (!peerConnection.current || !peerConnection.current.remoteDescription) {
+          console.log("Queueing ICE candidate because remote description is not set yet");
+          pendingCandidatesRef.current.push(data.candidate);
+          return;
+        }
+        try {
+          await peerConnection.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) {
+          console.error("Error adding ice candidate", e);
+        }
+      });
+
+      // Handle peer disconnection notification from server
+      newSocket.on("user-left", (userId: string) => {
+        console.log("Remote user left:", userId);
+        if (peerConnection.current) {
+          cleanupSession();
+        }
+      });
     }
+
+    initMode();
+
+    return () => {
+      isMounted = false;
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      if (connectionTimeout.current) {
+        clearTimeout(connectionTimeout.current);
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const connectToPeer = async () => {
+    if (!socketRef.current || !targetId) return;
     
-    // If we were a viewer, go back to disconnected. If host, go back to listening
-    setStatus(appMode === 'host' ? "connected" : "disconnected");
-    if (appMode === 'host') setStatus("disconnected");
+    setStatus("connecting");
+    setErrorMsg("");
+    
+    try {
+      const pc = await setupPeerConnection(socketRef.current, targetId, false);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      
+      socketRef.current.emit("offer", {
+        target: targetId,
+        offer: offer
+      });
+      
+      // Set a connection timeout
+      connectionTimeout.current = setTimeout(() => {
+        if (status === "connecting" || (peerConnection.current && peerConnection.current.iceConnectionState !== "connected")) {
+          console.error("Connection timed out");
+          setErrorMsg("Connection timed out. Make sure the host is online and the ID is correct.");
+          cleanupSession();
+        }
+      }, CONNECTION_TIMEOUT);
+      
+    } catch (err) {
+      console.error("Connection failed", err);
+      setErrorMsg("Failed to connect. Please try again.");
+      cleanupSession();
+    }
   };
 
-  const sendControl = (cmd: any) => {
+  const sendControl = useCallback((cmd: any) => {
     if (dataChannel.current && dataChannel.current.readyState === "open") {
       dataChannel.current.send(JSON.stringify(cmd));
     }
-  };
+  }, []);
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLVideoElement>) => {
     if (!remoteVideoRef.current) return;
     const rect = remoteVideoRef.current.getBoundingClientRect();
     const video = remoteVideoRef.current;
+    
+    // Prevent division by zero
+    if (rect.width === 0 || rect.height === 0 || video.videoWidth === 0 || video.videoHeight === 0) return;
     
     const scaleX = video.videoWidth / rect.width;
     const scaleY = video.videoHeight / rect.height;
@@ -298,46 +459,91 @@ function App() {
     const y = Math.round((e.clientY - rect.top) * scaleY);
     
     sendControl({ type: "mousemove", x, y });
-  };
+  }, [sendControl]);
 
-  const handleMouseClick = (e: React.MouseEvent<HTMLVideoElement>, type: "down" | "up") => {
+  const handleMouseClick = useCallback((e: React.MouseEvent<HTMLVideoElement>, type: "down" | "up") => {
     let button = "left";
     if (e.button === 1) button = "middle";
     if (e.button === 2) button = "right";
     sendControl({ type: "mouse" + type, button });
-  };
+  }, [sendControl]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     e.preventDefault();
     sendControl({ type: "keydown", key: e.key });
-  };
+  }, [sendControl]);
 
-  const handleKeyUp = (e: React.KeyboardEvent) => {
+  const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
     e.preventDefault();
     sendControl({ type: "keyup", key: e.key });
-  };
+  }, [sendControl]);
 
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    sendControl({ type: "scroll", deltaX: e.deltaX, deltaY: e.deltaY });
+  }, [sendControl]);
+
+  const copyId = useCallback(() => {
+    if (myId) {
+      navigator.clipboard.writeText(myId).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }).catch(() => {
+        // Fallback: select text
+      });
+    }
+  }, [myId]);
+
+  // ──── HOST VIEW ────
   if (appMode === 'host') {
     return (
       <div className="w-screen h-screen bg-black text-white flex flex-col items-center justify-center p-8">
-         <h1 className="text-3xl font-bold mb-4 text-primary">Antigravity Host</h1>
-         <p className="text-xl mb-8">Running invisibly in the system tray.</p>
-         <div className="bg-surface p-6 rounded-xl border border-slate-700">
-           <p className="text-slate-400 mb-2">Your Permanent ID (also on Desktop):</p>
-           <p className="text-4xl font-mono tracking-widest font-bold text-white selection:bg-primary/30">
-             {myId || "Generating..."}
-           </p>
-         </div>
-         <p className="text-sm text-slate-500 mt-8">You can close this window. The host will stay active in the tray.</p>
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/20 rounded-full blur-[120px] pointer-events-none"></div>
+        
+        <h1 className="text-3xl font-bold mb-4 text-primary relative z-10">Antigravity Host</h1>
+        <p className="text-xl mb-8 text-slate-300 relative z-10">Running invisibly in the system tray.</p>
+        
+        <div className="glass-panel p-6 rounded-xl relative z-10">
+          <p className="text-slate-400 mb-2">Your Permanent ID (also saved on Desktop):</p>
+          <div className="flex items-center gap-3">
+            <p className="text-4xl font-mono tracking-widest font-bold text-white selection:bg-primary/30">
+              {myId || "Generating..."}
+            </p>
+            <button
+              onClick={copyId}
+              className="p-2 rounded-lg bg-slate-700/50 hover:bg-slate-600 transition-colors"
+              title="Copy ID"
+            >
+              {copied ? <Check size={20} className="text-green-400" /> : <Copy size={20} className="text-slate-400" />}
+            </button>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-2 mt-6 relative z-10">
+          {signalingConnected ? (
+            <><Wifi size={16} className="text-green-400" /><span className="text-sm text-green-400">Server connected</span></>
+          ) : (
+            <><WifiOff size={16} className="text-red-400" /><span className="text-sm text-red-400">Server disconnected — reconnecting...</span></>
+          )}
+        </div>
+        
+        <p className="text-sm text-slate-500 mt-8 relative z-10">You can close this window. The host will stay active in the tray.</p>
       </div>
     );
   }
 
+  // ──── VIEWER - CONNECTED VIEW ────
   if (status === "connected" && appMode === "viewer") {
     return (
-      <div className="w-screen h-screen bg-black flex flex-col relative" tabIndex={0} onKeyDown={handleKeyDown} onKeyUp={handleKeyUp}>
+      <div
+        className="w-screen h-screen bg-black flex flex-col relative"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        onKeyUp={handleKeyUp}
+      >
         <div className="absolute top-0 left-1/2 -translate-x-1/2 z-50 glass-panel px-6 py-2 rounded-b-xl flex gap-4 items-center opacity-0 hover:opacity-100 transition-opacity duration-300">
-           <span className="text-sm font-medium">Viewing Remote Desk</span>
+           <span className="text-sm font-medium text-white">Viewing Remote Desk</span>
            <button onClick={cleanupSession} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white p-2 rounded-full transition-colors">
              <XCircle size={20} />
            </button>
@@ -347,16 +553,26 @@ function App() {
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          muted
+          onLoadedMetadata={() => {
+            // Force play as a fallback for autoplay blocking
+            remoteVideoRef.current?.play().catch(err => {
+              console.warn("Play on metadata failed:", err);
+            });
+          }}
           onMouseMove={handleMouseMove}
           onMouseDown={(e) => handleMouseClick(e, "down")}
           onMouseUp={(e) => handleMouseClick(e, "up")}
+          onWheel={handleWheel}
           onContextMenu={(e) => e.preventDefault()}
           className="w-full h-full object-contain cursor-crosshair"
+          style={{ background: '#000' }}
         />
       </div>
     );
   }
 
+  // ──── VIEWER - CONNECT FORM ────
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6 relative">
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] pointer-events-none"></div>
@@ -365,7 +581,16 @@ function App() {
       <div className="glass-panel rounded-2xl shadow-2xl p-8 w-full max-w-md relative z-10 flex flex-col">
           <div className="flex items-center justify-center gap-3 mb-8">
             <MonitorPlay className="text-primary" size={32} />
-            <h2 className="text-3xl font-bold">Connect</h2>
+            <h2 className="text-3xl font-bold text-white">Connect</h2>
+          </div>
+          
+          {/* Signaling server status */}
+          <div className="flex items-center justify-center gap-2 mb-4">
+            {signalingConnected ? (
+              <><Wifi size={14} className="text-green-400" /><span className="text-xs text-green-400">Server connected</span></>
+            ) : (
+              <><WifiOff size={14} className="text-red-400" /><span className="text-xs text-red-400">Connecting to server...</span></>
+            )}
           </div>
           
           <div className="bg-surface rounded-xl p-6 border border-slate-700/50 flex flex-col justify-center">
@@ -375,23 +600,37 @@ function App() {
                  <Key size={20} className="text-slate-400" />
                </div>
                <input 
+                 id="remote-id-input"
                  type="text" 
                  value={targetId}
-                 onChange={(e) => setTargetId(e.target.value)}
+                 onChange={(e) => {
+                   setTargetId(e.target.value);
+                   setErrorMsg("");
+                 }}
                  className="w-full bg-slate-900/50 border-2 border-slate-600 rounded-lg py-4 pl-12 pr-4 text-white text-xl tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all font-mono"
                  placeholder="123456789"
                  maxLength={9}
+                 onKeyDown={(e) => {
+                   if (e.key === 'Enter' && targetId.length >= 5 && status !== "connecting") {
+                     connectToPeer();
+                   }
+                 }}
                />
              </div>
              
-             {errorMsg && <p className="text-red-400 text-sm mb-4 text-center">{errorMsg}</p>}
+             {errorMsg && <p className="text-red-400 text-sm mb-4 text-center animate-pulse">{errorMsg}</p>}
 
              <button 
+                id="connect-button"
                 onClick={connectToPeer}
-                disabled={status === "connecting" || targetId.length < 5}
-                className="w-full bg-primary hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-400 text-white font-semibold py-4 rounded-lg shadow-lg hover:shadow-primary/20 transition-all active:scale-[0.98] text-lg tracking-wide"
+                disabled={status === "connecting" || targetId.length < 5 || !signalingConnected}
+                className="w-full bg-primary hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-400 text-white font-semibold py-4 rounded-lg shadow-lg hover:shadow-primary/20 transition-all active:scale-[0.98] text-lg tracking-wide flex items-center justify-center gap-2"
              >
-               {status === "connecting" ? "Connecting..." : "Start Controlling"}
+               {status === "connecting" ? (
+                 <><Loader2 size={20} className="animate-spin" /> Connecting...</>
+               ) : (
+                 "Start Controlling"
+               )}
              </button>
           </div>
       </div>

@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mouseUp: (button) => ipcRenderer.send('MOUSE_UP', { button }),
   keyDown: (key) => ipcRenderer.send('KEY_DOWN', { key }),
   keyUp: (key) => ipcRenderer.send('KEY_UP', { key }),
+  scrollWheel: (deltaX, deltaY) => ipcRenderer.send('SCROLL_WHEEL', { deltaX, deltaY }),
 });
