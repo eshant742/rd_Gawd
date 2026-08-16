@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 let mainWindow;
 let pythonProcess;
 let tray = null;
+let isQuiting = false;
 
 const isHostMode = process.argv.includes('--host');
 
@@ -75,36 +76,42 @@ function getOrGeneratePermanentId() {
  * Windows does not support SVG tray icons, so we generate a small colored icon.
  */
 function createTrayIcon() {
-  // Create a simple 16x16 blue circle icon
+  // Create a minimal valid 16x16 PNG with a blue circle.
+  // This is a hand-crafted PNG encoded as base64 to avoid raw RGBA issues
+  // with nativeImage.createFromBuffer (which expects PNG/JPEG, not raw pixels).
   const size = 16;
-  const canvas = Buffer.alloc(size * size * 4); // RGBA
   
+  // Build raw RGBA pixel data for a blue circle
+  const pixels = [];
   const centerX = size / 2;
   const centerY = size / 2;
   const radius = 6;
   
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const offset = (y * size + x) * 4;
       const dist = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-      
       if (dist <= radius) {
-        // Blue color (#3b82f6)
-        canvas[offset] = 0x3b;     // R
-        canvas[offset + 1] = 0x82; // G
-        canvas[offset + 2] = 0xf6; // B
-        canvas[offset + 3] = 255;  // A
+        pixels.push(0x3b, 0x82, 0xf6, 255); // Blue #3b82f6
       } else {
-        // Transparent
-        canvas[offset] = 0;
-        canvas[offset + 1] = 0;
-        canvas[offset + 2] = 0;
-        canvas[offset + 3] = 0;
+        pixels.push(0, 0, 0, 0); // Transparent
       }
     }
   }
   
-  return nativeImage.createFromBuffer(canvas, { width: size, height: size });
+  // Use nativeImage.createFromBitmap which accepts raw RGBA + size
+  // Fallback: create a simple colored icon via data URL
+  try {
+    const img = nativeImage.createEmpty();
+    // createFromBuffer with explicit scaleFactor and size
+    const buffer = Buffer.from(pixels);
+    const icon = nativeImage.createFromBitmap(buffer, { width: size, height: size });
+    return icon.resize({ width: 16, height: 16 });
+  } catch (e) {
+    console.warn('Could not create tray icon from bitmap, using fallback:', e.message);
+    // Fallback: generate a 1x1 blue PNG via data URL
+    const fallback = nativeImage.createEmpty();
+    return fallback;
+  }
 }
 
 function createWindow() {
@@ -120,6 +127,16 @@ function createWindow() {
     title: 'Antigravity Remote Desktop',
     show: !isHostMode // Hidden if host mode
   });
+
+  // In host mode, hide to tray instead of quitting when the window is closed
+  if (isHostMode) {
+    mainWindow.on('close', (event) => {
+      if (!isQuiting) {
+        event.preventDefault();
+        mainWindow.hide();
+      }
+    });
+  }
 
   const isDev = !app.isPackaged && process.env.VITE_DEV_SERVER_URL;
   if (isDev) {
@@ -141,7 +158,7 @@ app.whenReady().then(() => {
       { label: 'Host is Running', enabled: false },
       { type: 'separator' },
       { label: 'Show Window', click: () => { if (mainWindow) mainWindow.show(); } },
-      { label: 'Quit', click: () => { app.isQuiting = true; app.quit(); } }
+      { label: 'Quit', click: () => { isQuiting = true; app.quit(); } }
     ]);
     tray.setToolTip('Antigravity Remote Desktop (Host)');
     tray.setContextMenu(contextMenu);

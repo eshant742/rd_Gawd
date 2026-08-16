@@ -48,6 +48,7 @@ function App() {
   const connectionTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const modeRef = useRef<string>("viewer");
+  const myIdRef = useRef<string>("");
 
   const cleanupSession = useCallback(() => {
     // Clear connection timeout
@@ -249,18 +250,9 @@ function App() {
         throw err;
       }
     } else {
-      // Viewer side
-      pc.ontrack = (event) => {
-        console.log("Received remote track:", event.track.kind, "streams:", event.streams.length);
-        if (remoteVideoRef.current && event.streams[0]) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-          
-          // Force play as a fallback
-          remoteVideoRef.current.play().catch(err => {
-            console.warn("Auto-play failed, will retry:", err);
-          });
-        }
-      };
+      // Viewer side — the shared ontrack handler at line 118 already saves
+      // the stream to remoteStreamRef, which is attached when the <video> mounts.
+      // Do NOT overwrite pc.ontrack here.
 
       const dc = pc.createDataChannel("control", {
         ordered: true
@@ -299,8 +291,9 @@ function App() {
         if (isMounted) setSignalingConnected(true);
         
         // Re-join room on reconnect (important!)
-        if (modeRef.current === 'host' && myId) {
-          newSocket.emit('join-room', myId);
+        // Use myIdRef instead of myId to avoid stale closure
+        if (modeRef.current === 'host' && myIdRef.current) {
+          newSocket.emit('join-room', myIdRef.current);
         }
       });
 
@@ -324,7 +317,10 @@ function App() {
         if (mode === 'host') {
           // @ts-ignore
           const permId = await window.electronAPI.getPermanentId();
-          if (isMounted) setMyId(permId);
+          if (isMounted) {
+            setMyId(permId);
+            myIdRef.current = permId;
+          }
           newSocket.emit('join-room', permId); // Host registers their permanent ID as a room
         }
       } else {
@@ -449,8 +445,9 @@ function App() {
       });
       
       // Set a connection timeout
+      // Check ICE state via ref instead of stale `status` closure
       connectionTimeout.current = setTimeout(() => {
-        if (status === "connecting" || (peerConnection.current && peerConnection.current.iceConnectionState !== "connected")) {
+        if (peerConnection.current && peerConnection.current.iceConnectionState !== "connected" && peerConnection.current.iceConnectionState !== "completed") {
           console.error("Connection timed out");
           setErrorMsg("Connection timed out. Make sure the host is online and the ID is correct.");
           cleanupSession();
@@ -504,7 +501,7 @@ function App() {
     sendControl({ type: "keyup", key: e.key });
   }, [sendControl]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     sendControl({ type: "scroll", deltaX: e.deltaX, deltaY: e.deltaY });
   }, [sendControl]);
@@ -519,6 +516,30 @@ function App() {
       });
     }
   }, [myId]);
+
+  // Attach stream when video element mounts (must be before conditional returns per Rules of Hooks)
+  useEffect(() => {
+    if (status === "connected" && appMode === "viewer" && remoteVideoRef.current && remoteStreamRef.current) {
+      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+        console.log("Setting remote video stream to video element on mount");
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        remoteVideoRef.current.play().catch(err => {
+          console.warn("Auto-play on mount failed:", err);
+        });
+      }
+    }
+  }, [status, appMode]);
+
+  // Attach non-passive wheel listener to prevent scrolling while controlling remote desktop
+  useEffect(() => {
+    const videoEl = remoteVideoRef.current;
+    if (status === "connected" && appMode === "viewer" && videoEl) {
+      videoEl.addEventListener('wheel', handleWheel, { passive: false });
+      return () => {
+        videoEl.removeEventListener('wheel', handleWheel);
+      };
+    }
+  }, [status, appMode, handleWheel]);
 
   // ──── HOST VIEW ────
   if (appMode === 'host') {
@@ -560,17 +581,6 @@ function App() {
   }
 
   // ──── VIEWER - CONNECTED VIEW ────
-  
-  // Attach stream when video element mounts
-  useEffect(() => {
-    if (status === "connected" && appMode === "viewer" && remoteVideoRef.current && remoteStreamRef.current) {
-      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
-        console.log("Setting remote video stream to video element on mount");
-        remoteVideoRef.current.srcObject = remoteStreamRef.current;
-      }
-    }
-  }, [status, appMode]);
-
   if (status === "connected" && appMode === "viewer") {
     return (
       <div
@@ -600,7 +610,6 @@ function App() {
           onMouseMove={handleMouseMove}
           onMouseDown={(e) => handleMouseClick(e, "down")}
           onMouseUp={(e) => handleMouseClick(e, "up")}
-          onWheel={handleWheel}
           onContextMenu={(e) => e.preventDefault()}
           className="w-full h-full object-contain cursor-crosshair"
           style={{ background: '#000' }}
