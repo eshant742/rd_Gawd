@@ -12,7 +12,7 @@ app.use(cors());
 app.get('/', (req, res) => {
   res.status(200).json({
     status: 'ok',
-    service: 'Antigravity Remote Desktop Signaling Server',
+    service: 'Omniscreen Signaling Server',
     uptime: process.uptime(),
     connections: io.engine.clientsCount || 0
   });

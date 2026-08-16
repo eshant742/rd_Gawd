@@ -125,7 +125,7 @@ function createWindow() {
       nodeIntegration: false,
     },
     autoHideMenuBar: true,
-    title: 'Antigravity Remote Desktop',
+    title: 'Omniscreen',
     show: !isHostMode // Hidden if host mode
   });
 
@@ -161,7 +161,7 @@ app.whenReady().then(() => {
       { label: 'Show Window', click: () => { if (mainWindow) mainWindow.show(); } },
       { label: 'Quit', click: () => { isQuiting = true; app.quit(); } }
     ]);
-    tray.setToolTip('Antigravity Remote Desktop (Host)');
+    tray.setToolTip('Omniscreen (Host)');
     tray.setContextMenu(contextMenu);
   }
 

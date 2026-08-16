@@ -51,6 +51,7 @@ function App() {
   const myIdRef = useRef<string>("");
   const rafId = useRef<number | null>(null);
   const pendingMouse = useRef<{x: number, y: number} | null>(null);
+  const lastMouseTime = useRef<number>(0);
 
   const cleanupSession = useCallback(() => {
     // Clear connection timeout
@@ -127,6 +128,13 @@ function App() {
 
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.track.kind);
+      
+      // Zero-latency jitter buffer disable
+      if (event.receiver && 'playoutDelayHint' in event.receiver) {
+        // @ts-ignore
+        event.receiver.playoutDelayHint = 0;
+      }
+
       if (event.track) {
         // Create a new stream from the track if event.streams is empty or reliable
         const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
@@ -238,10 +246,10 @@ function App() {
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 8000000; // 8 Mbps for crisp 1080p
+            params.encodings[0].maxBitrate = 5000000; // 5 Mbps for consistent low latency without queueing
             params.encodings[0].maxFramerate = 60;
             // @ts-ignore — degradationPreference is valid but not in all TS defs
-            params.degradationPreference = 'maintain-resolution';
+            params.degradationPreference = 'maintain-framerate'; // Drops resolution over dropping frames for smooth motion
             try {
               await sender.setParameters(params);
             } catch (e) {
@@ -529,16 +537,11 @@ function App() {
     const coords = getHostCoords(e);
     if (!coords) return;
 
-    // Throttle: only send one mousemove per animation frame (~60fps)
-    pendingMouse.current = coords;
-    if (!rafId.current) {
-      rafId.current = requestAnimationFrame(() => {
-        if (pendingMouse.current) {
-          sendControl({ type: "mousemove", ...pendingMouse.current });
-          pendingMouse.current = null;
-        }
-        rafId.current = null;
-      });
+    // High-frequency throttle (2ms ~ 500Hz) to prevent flooding while keeping zero perceived latency
+    const now = Date.now();
+    if (now - lastMouseTime.current >= 2) {
+      sendControl({ type: "mousemove", ...coords });
+      lastMouseTime.current = now;
     }
   }, [getHostCoords, sendControl]);
 
@@ -612,7 +615,7 @@ function App() {
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 rounded-full blur-[120px] pointer-events-none"></div>
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/20 rounded-full blur-[120px] pointer-events-none"></div>
         
-        <h1 className="text-3xl font-bold mb-4 text-primary relative z-10">Antigravity Host</h1>
+        <h1 className="text-3xl font-bold mb-4 text-primary relative z-10">Omniscreen Host</h1>
         <p className="text-xl mb-8 text-slate-300 relative z-10">Running invisibly in the system tray.</p>
         
         <div className="glass-panel p-6 rounded-xl relative z-10">
@@ -665,6 +668,8 @@ function App() {
           autoPlay
           playsInline
           muted
+          disablePictureInPicture
+          disableRemotePlayback
           onLoadedMetadata={() => {
             // Force play as a fallback for autoplay blocking
             remoteVideoRef.current?.play().catch(err => {
@@ -744,7 +749,7 @@ function App() {
              </button>
           </div>
       </div>
-      <p className="text-secondary text-sm mt-8 opacity-70">Antigravity Remote Desktop</p>
+      <p className="text-secondary text-sm mt-8 opacity-70">Omniscreen</p>
     </div>
   );
 }
