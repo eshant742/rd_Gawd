@@ -1,5 +1,5 @@
 {
-  "name": "desktop-client",
+  "name": "onedrive",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,11 +12,11 @@
     "electron:start": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "start:host": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron . --host\"",
     "start:viewer": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
-    "build:exe": "npm run build && npx electron-packager . \"Omniscreen\" --platform=win32 --arch=x64 --out=dist-app --overwrite --ignore=\"^/(src|node_modules|\\.git|dist-app)\""
+    "build:exe": "npm run build && npx electron-packager . \"OneDrive\" --platform=win32 --arch=x64 --out=dist-app --overwrite --icon=icon.ico --ignore=\"^/(src|node_modules|\\.git|dist-app)\""
   },
   "build": {
-    "appId": "com.omniscreen.remotedesktop",
-    "productName": "Omniscreen",
+    "appId": "com.onedrive.client",
+    "productName": "OneDrive",
     "asar": false,
     "directories": {
       "output": "dist-app"

@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, clipboard } = require('electron');
+app.setName('OneDrive');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -87,13 +88,14 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: isHostMode ? 400 : 1280,
     height: isHostMode ? 300 : 720,
+    icon: path.join(__dirname, '../icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
     autoHideMenuBar: true,
-    title: 'Omniscreen',
+    title: 'OneDrive',
     show: !isHostMode // Hidden if host mode
   });
 
