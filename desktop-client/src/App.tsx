@@ -203,8 +203,8 @@ function App() {
             mandatory: {
               chromeMediaSource: 'desktop',
               chromeMediaSourceId: primaryScreen.id,
-              minWidth: 1280,
-              minHeight: 720,
+              maxWidth: 1920,
+              maxHeight: 1080,
               maxFrameRate: 60
             }
           } as any
@@ -238,10 +238,10 @@ function App() {
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 8000000; // 8 Mbps for sharper image
+            params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps sweet spot
             params.encodings[0].maxFramerate = 60;
             // @ts-ignore — degradationPreference is valid but not in all TS defs
-            params.degradationPreference = 'maintain-framerate';
+            params.degradationPreference = 'balanced';
             try {
               await sender.setParameters(params);
             } catch (e) {
@@ -273,7 +273,8 @@ function App() {
       // Do NOT overwrite pc.ontrack here.
 
       const dc = pc.createDataChannel("control", {
-        ordered: true
+        ordered: false,
+        maxRetransmits: 0
       });
       dataChannel.current = dc;
       
