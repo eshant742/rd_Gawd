@@ -49,6 +49,8 @@ function App() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const modeRef = useRef<string>("viewer");
   const myIdRef = useRef<string>("");
+  const rafId = useRef<number | null>(null);
+  const pendingMouse = useRef<{x: number, y: number} | null>(null);
 
   const cleanupSession = useCallback(() => {
     // Clear connection timeout
@@ -73,6 +75,13 @@ function App() {
       remoteVideoRef.current.srcObject = null;
     }
     remoteStreamRef.current = null;
+    
+    // Cancel any pending mouse move animation frame
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
+    pendingMouse.current = null;
     
     pendingCandidatesRef.current = [];
     setStatus("disconnected");
@@ -196,7 +205,7 @@ function App() {
               chromeMediaSourceId: primaryScreen.id,
               minWidth: 1280,
               minHeight: 720,
-              maxFrameRate: 30
+              maxFrameRate: 60
             }
           } as any
         });
@@ -210,6 +219,13 @@ function App() {
         }
         console.log("Captured video track:", videoTracks[0].label, "enabled:", videoTracks[0].enabled);
         
+        // Hint the encoder to prioritize motion/framerate over detail
+        videoTracks.forEach(track => {
+          if ('contentHint' in track) {
+            track.contentHint = 'motion';
+          }
+        });
+        
         stream.getTracks().forEach((track) => {
           pc.addTrack(track, stream);
         });
@@ -222,8 +238,10 @@ function App() {
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 5000000; // 5 Mbps
-            params.encodings[0].maxFramerate = 30;
+            params.encodings[0].maxBitrate = 8000000; // 8 Mbps for sharper image
+            params.encodings[0].maxFramerate = 60;
+            // @ts-ignore — degradationPreference is valid but not in all TS defs
+            params.degradationPreference = 'maintain-framerate';
             try {
               await sender.setParameters(params);
             } catch (e) {
@@ -467,29 +485,74 @@ function App() {
     }
   }, []);
 
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!remoteVideoRef.current) return;
-    const rect = remoteVideoRef.current.getBoundingClientRect();
+  // Convert mouse position from video element to host screen coordinates,
+  // accounting for object-contain letterboxing/pillarboxing
+  const getHostCoords = useCallback((e: React.MouseEvent<HTMLVideoElement>): {x: number, y: number} | null => {
     const video = remoteVideoRef.current;
-    
-    // Prevent division by zero
-    if (rect.width === 0 || rect.height === 0 || video.videoWidth === 0 || video.videoHeight === 0) return;
-    
-    const scaleX = video.videoWidth / rect.width;
-    const scaleY = video.videoHeight / rect.height;
-    
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
-    
-    sendControl({ type: "mousemove", x, y });
-  }, [sendControl]);
+    if (!video) return null;
+    const rect = video.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0 || video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    // Calculate actual rendered video dimensions inside the element (object-contain)
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const elementAspect = rect.width / rect.height;
+    let renderedW: number, renderedH: number, offsetX: number, offsetY: number;
+
+    if (videoAspect > elementAspect) {
+      // Video wider → fits width, letterboxed top/bottom
+      renderedW = rect.width;
+      renderedH = rect.width / videoAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderedH) / 2;
+    } else {
+      // Video taller → fits height, pillarboxed left/right
+      renderedH = rect.height;
+      renderedW = rect.height * videoAspect;
+      offsetX = (rect.width - renderedW) / 2;
+      offsetY = 0;
+    }
+
+    const relX = e.clientX - rect.left - offsetX;
+    const relY = e.clientY - rect.top - offsetY;
+
+    // Ignore clicks on the black bars
+    if (relX < 0 || relX > renderedW || relY < 0 || relY > renderedH) return null;
+
+    return {
+      x: Math.round((relX / renderedW) * video.videoWidth),
+      y: Math.round((relY / renderedH) * video.videoHeight)
+    };
+  }, []);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLVideoElement>) => {
+    const coords = getHostCoords(e);
+    if (!coords) return;
+
+    // Throttle: only send one mousemove per animation frame (~60fps)
+    pendingMouse.current = coords;
+    if (!rafId.current) {
+      rafId.current = requestAnimationFrame(() => {
+        if (pendingMouse.current) {
+          sendControl({ type: "mousemove", ...pendingMouse.current });
+          pendingMouse.current = null;
+        }
+        rafId.current = null;
+      });
+    }
+  }, [getHostCoords, sendControl]);
 
   const handleMouseClick = useCallback((e: React.MouseEvent<HTMLVideoElement>, type: "down" | "up") => {
+    // Send an immediate position update before the click so the cursor
+    // is at the exact right spot (in case the last mousemove was throttled)
+    const coords = getHostCoords(e);
+    if (coords) {
+      sendControl({ type: "mousemove", ...coords });
+    }
     let button = "left";
     if (e.button === 1) button = "middle";
     if (e.button === 2) button = "right";
     sendControl({ type: "mouse" + type, button });
-  }, [sendControl]);
+  }, [getHostCoords, sendControl]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     e.preventDefault();
@@ -611,7 +674,7 @@ function App() {
           onMouseDown={(e) => handleMouseClick(e, "down")}
           onMouseUp={(e) => handleMouseClick(e, "up")}
           onContextMenu={(e) => e.preventDefault()}
-          className="w-full h-full object-contain cursor-crosshair"
+          className="w-full h-full object-contain cursor-none"
           style={{ background: '#000' }}
         />
       </div>

@@ -1,109 +1,192 @@
 import sys
 import json
-import pyautogui
+import platform
 
-# Disable fail-safe (which stops the script if mouse moves to a corner)
-pyautogui.FAILSAFE = False
+IS_WINDOWS = platform.system() == 'Windows'
 
-# Mapping web KeyboardEvent.key to pyautogui keys where they differ
-KEY_MAP = {
-    "ArrowUp": "up",
-    "ArrowDown": "down",
-    "ArrowLeft": "left",
-    "ArrowRight": "right",
-    "Escape": "esc",
-    "Control": "ctrl",
-    "Alt": "alt",
-    "Shift": "shift",
-    "Meta": "win",
-    "Enter": "enter",
-    "Backspace": "backspace",
-    "Tab": "tab",
-    " ": "space",
-    "Delete": "delete",
-    "Home": "home",
-    "End": "end",
-    "PageUp": "pageup",
-    "PageDown": "pagedown",
-    "Insert": "insert",
-    "CapsLock": "capslock",
-    "NumLock": "numlock",
-    "ScrollLock": "scrolllock",
-    "Pause": "pause",
-    "PrintScreen": "printscreen",
-    "F1": "f1",
-    "F2": "f2",
-    "F3": "f3",
-    "F4": "f4",
-    "F5": "f5",
-    "F6": "f6",
-    "F7": "f7",
-    "F8": "f8",
-    "F9": "f9",
-    "F10": "f10",
-    "F11": "f11",
-    "F12": "f12",
-}
+# ──── Windows: Direct Win32 API via ctypes (ultra-low latency) ────
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # Mouse event flags
+    MOUSEEVENTF_LEFTDOWN   = 0x0002
+    MOUSEEVENTF_LEFTUP     = 0x0004
+    MOUSEEVENTF_RIGHTDOWN  = 0x0008
+    MOUSEEVENTF_RIGHTUP    = 0x0010
+    MOUSEEVENTF_MIDDLEDOWN = 0x0020
+    MOUSEEVENTF_MIDDLEUP   = 0x0040
+    MOUSEEVENTF_WHEEL      = 0x0800
+    MOUSEEVENTF_HWHEEL     = 0x1000
+
+    # Keyboard event flags
+    KEYEVENTF_KEYUP  = 0x0002
+    KEYEVENTF_UNICODE = 0x0004
+
+    # Virtual key code mapping from web KeyboardEvent.key
+    VK_MAP = {
+        "Backspace": 0x08, "Tab": 0x09, "Enter": 0x0D, "Shift": 0x10,
+        "Control": 0x11, "Alt": 0x12, "Pause": 0x13, "CapsLock": 0x14,
+        "Escape": 0x1B, " ": 0x20, "PageUp": 0x21, "PageDown": 0x22,
+        "End": 0x23, "Home": 0x24, "ArrowLeft": 0x25, "ArrowUp": 0x26,
+        "ArrowRight": 0x27, "ArrowDown": 0x28, "PrintScreen": 0x2C,
+        "Insert": 0x2D, "Delete": 0x2E, "Meta": 0x5B,
+        "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+        "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+        "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+        "NumLock": 0x90, "ScrollLock": 0x91,
+    }
+
+    # For single character keys, use VkKeyScanW to get virtual key code
+    def get_vk_code(key):
+        """Get Windows virtual key code for a web KeyboardEvent.key value."""
+        if key in VK_MAP:
+            return VK_MAP[key], False
+        if len(key) == 1:
+            # Use VkKeyScanW for printable characters
+            result = user32.VkKeyScanW(ord(key))
+            vk = result & 0xFF
+            if vk != 0xFF:
+                return vk, False
+            # Fallback: send as unicode
+            return ord(key), True
+        return None, False
+
+    def mouse_move(x, y):
+        user32.SetCursorPos(int(x), int(y))
+
+    def mouse_down(button):
+        flags = {"left": MOUSEEVENTF_LEFTDOWN, "right": MOUSEEVENTF_RIGHTDOWN, "middle": MOUSEEVENTF_MIDDLEDOWN}
+        user32.mouse_event(flags.get(button, MOUSEEVENTF_LEFTDOWN), 0, 0, 0, 0)
+
+    def mouse_up(button):
+        flags = {"left": MOUSEEVENTF_LEFTUP, "right": MOUSEEVENTF_RIGHTUP, "middle": MOUSEEVENTF_MIDDLEUP}
+        user32.mouse_event(flags.get(button, MOUSEEVENTF_LEFTUP), 0, 0, 0, 0)
+
+    def key_down(key):
+        vk, is_unicode = get_vk_code(key)
+        if vk is not None:
+            if is_unicode:
+                user32.keybd_event(0, vk, KEYEVENTF_UNICODE, 0)
+            else:
+                user32.keybd_event(vk, 0, 0, 0)
+
+    def key_up(key):
+        vk, is_unicode = get_vk_code(key)
+        if vk is not None:
+            if is_unicode:
+                user32.keybd_event(0, vk, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0)
+            else:
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+    WHEEL_DELTA = 120  # Standard Windows wheel delta
+
+    def scroll_wheel(delta_x, delta_y):
+        # Convert web wheel delta to Windows WHEEL_DELTA units
+        # Web sends ~100 per notch, Windows uses 120 per notch
+        if delta_y != 0:
+            clicks = -int(round(delta_y / 100))
+            if clicks != 0:
+                user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, ctypes.c_long(clicks * WHEEL_DELTA).value, 0)
+        if delta_x != 0:
+            clicks = -int(round(delta_x / 100))
+            if clicks != 0:
+                user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, ctypes.c_long(clicks * WHEEL_DELTA).value, 0)
+
+# ──── Fallback: pyautogui for non-Windows platforms ────
+else:
+    import pyautogui
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0
+
+    KEY_MAP = {
+        "ArrowUp": "up", "ArrowDown": "down", "ArrowLeft": "left", "ArrowRight": "right",
+        "Escape": "esc", "Control": "ctrl", "Alt": "alt", "Shift": "shift",
+        "Meta": "win", "Enter": "enter", "Backspace": "backspace", "Tab": "tab",
+        " ": "space", "Delete": "delete", "Home": "home", "End": "end",
+        "PageUp": "pageup", "PageDown": "pagedown", "Insert": "insert",
+        "CapsLock": "capslock", "NumLock": "numlock", "ScrollLock": "scrolllock",
+        "Pause": "pause", "PrintScreen": "printscreen",
+        "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4", "F5": "f5", "F6": "f6",
+        "F7": "f7", "F8": "f8", "F9": "f9", "F10": "f10", "F11": "f11", "F12": "f12",
+    }
+
+    def mouse_move(x, y):
+        pyautogui.moveTo(x, y, _pause=False)
+
+    def mouse_down(button):
+        pyautogui.mouseDown(button=button, _pause=False)
+
+    def mouse_up(button):
+        pyautogui.mouseUp(button=button, _pause=False)
+
+    def key_down(key):
+        mapped = KEY_MAP.get(key, key.lower())
+        if mapped in pyautogui.KEY_NAMES or len(mapped) == 1:
+            pyautogui.keyDown(mapped, _pause=False)
+
+    def key_up(key):
+        mapped = KEY_MAP.get(key, key.lower())
+        if mapped in pyautogui.KEY_NAMES or len(mapped) == 1:
+            pyautogui.keyUp(mapped, _pause=False)
+
+    def scroll_wheel(delta_x, delta_y):
+        if delta_y != 0:
+            clicks = -int(delta_y / 100) if abs(delta_y) >= 100 else (-1 if delta_y > 0 else 1)
+            pyautogui.scroll(clicks, _pause=False)
+        if delta_x != 0:
+            clicks = -int(delta_x / 100) if abs(delta_x) >= 100 else (-1 if delta_x > 0 else 1)
+            try:
+                pyautogui.hscroll(clicks, _pause=False)
+            except AttributeError:
+                pass
+
+
+# ──── Command processor ────
+
+# Accumulate fractional scroll deltas so small scrolls aren't lost
+scroll_accum_x = 0.0
+scroll_accum_y = 0.0
 
 def process_command(cmd_str):
+    global scroll_accum_x, scroll_accum_y
     try:
         cmd = json.loads(cmd_str)
         action = cmd.get("type")
-        
+
         if action == "mousemove":
             x, y = cmd.get("x"), cmd.get("y")
             if x is not None and y is not None:
-                # Move instantly
-                pyautogui.moveTo(x, y, _pause=False)
-            
+                mouse_move(x, y)
+
         elif action == "mousedown":
-            btn = cmd.get("button", "left")
-            pyautogui.mouseDown(button=btn, _pause=False)
-            
+            mouse_down(cmd.get("button", "left"))
+
         elif action == "mouseup":
-            btn = cmd.get("button", "left")
-            pyautogui.mouseUp(button=btn, _pause=False)
-            
+            mouse_up(cmd.get("button", "left"))
+
         elif action == "keydown":
-            key = cmd.get("key", "")
-            mapped_key = KEY_MAP.get(key, key.lower())
-            if mapped_key in pyautogui.KEY_NAMES or len(mapped_key) == 1:
-                pyautogui.keyDown(mapped_key, _pause=False)
-                
+            key_down(cmd.get("key", ""))
+
         elif action == "keyup":
-            key = cmd.get("key", "")
-            mapped_key = KEY_MAP.get(key, key.lower())
-            if mapped_key in pyautogui.KEY_NAMES or len(mapped_key) == 1:
-                pyautogui.keyUp(mapped_key, _pause=False)
-        
+            key_up(cmd.get("key", ""))
+
         elif action == "scroll":
-            deltaX = cmd.get("deltaX", 0)
-            deltaY = cmd.get("deltaY", 0)
-            # Convert web wheel delta to scroll clicks
-            # Web deltaY is typically ~100 per notch, pyautogui scroll uses clicks
-            scrollClicks = -int(deltaY / 100) if deltaY != 0 else 0
-            hScrollClicks = -int(deltaX / 100) if deltaX != 0 else 0
-            
-            if scrollClicks != 0:
-                pyautogui.scroll(scrollClicks, _pause=False)
-            if hScrollClicks != 0:
-                try:
-                    pyautogui.hscroll(hScrollClicks, _pause=False)
-                except AttributeError:
-                    pass  # hscroll not available on all platforms
-                
+            scroll_wheel(cmd.get("deltaX", 0), cmd.get("deltaY", 0))
+
     except json.JSONDecodeError:
         print(f"Invalid JSON: {cmd_str}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"Error processing command: {e}", file=sys.stderr, flush=True)
 
+
 if __name__ == "__main__":
-    # Disable artificial pause after each pyautogui command for lowest latency
-    pyautogui.PAUSE = 0
-    
-    print("Input server started.", file=sys.stderr, flush=True)
-    
-    # Read commands from standard input continuously
+    mode = "ctypes/Win32 API" if IS_WINDOWS else "pyautogui"
+    print(f"Input server started. Mode: {mode}", file=sys.stderr, flush=True)
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
