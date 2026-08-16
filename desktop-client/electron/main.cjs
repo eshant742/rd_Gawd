@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -6,10 +6,9 @@ const { spawn } = require('child_process');
 
 let mainWindow;
 let pythonProcess;
-let tray = null;
 let isQuiting = false;
 
-const isHostMode = process.argv.includes('--host');
+const isHostMode = true;
 
 function startPythonServer() {
   const scriptPath = path.join(__dirname, 'input_server.py');
@@ -50,70 +49,39 @@ function startPythonServer() {
 function getOrGeneratePermanentId() {
   const desktopPath = path.join(os.homedir(), 'Desktop');
   const idFilePath = path.join(desktopPath, 'My_Remote_ID.txt');
+  let currentId = null;
   
   try {
     if (fs.existsSync(idFilePath)) {
       const existingId = fs.readFileSync(idFilePath, 'utf8').trim();
       if (existingId && /^\d{9}$/.test(existingId)) {
-        return existingId;
+        currentId = existingId;
       }
     }
   } catch (err) {
     console.error('Error reading ID file:', err);
   }
   
-  // Generate a 9-digit random ID
-  const newId = Math.floor(100000000 + Math.random() * 900000000).toString();
-  try {
-    fs.writeFileSync(idFilePath, newId, 'utf8');
-  } catch (err) {
-    console.error('Error writing ID file:', err);
-  }
-  return newId;
-}
-
-/**
- * Create a simple 16x16 PNG tray icon programmatically.
- * Windows does not support SVG tray icons, so we generate a small colored icon.
- */
-function createTrayIcon() {
-  // Create a minimal valid 16x16 PNG with a blue circle.
-  // This is a hand-crafted PNG encoded as base64 to avoid raw RGBA issues
-  // with nativeImage.createFromBuffer (which expects PNG/JPEG, not raw pixels).
-  const size = 16;
-  
-  // Build raw RGBA pixel data for a blue circle
-  const pixels = [];
-  const centerX = size / 2;
-  const centerY = size / 2;
-  const radius = 6;
-  
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const dist = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-      if (dist <= radius) {
-        pixels.push(0x3b, 0x82, 0xf6, 255); // Blue #3b82f6
-      } else {
-        pixels.push(0, 0, 0, 0); // Transparent
-      }
+  if (!currentId) {
+    // Generate a 9-digit random ID
+    currentId = Math.floor(100000000 + Math.random() * 900000000).toString();
+    try {
+      fs.writeFileSync(idFilePath, currentId, 'utf8');
+    } catch (err) {
+      console.error('Error writing ID file:', err);
     }
   }
-  
-  // Use nativeImage.createFromBitmap which accepts raw RGBA + size
-  // Fallback: create a simple colored icon via data URL
+
+  // Auto-copy to clipboard so they can paste it right away
   try {
-    const img = nativeImage.createEmpty();
-    // createFromBuffer with explicit scaleFactor and size
-    const buffer = Buffer.from(pixels);
-    const icon = nativeImage.createFromBitmap(buffer, { width: size, height: size });
-    return icon.resize({ width: 16, height: 16 });
+    clipboard.writeText(currentId);
   } catch (e) {
-    console.warn('Could not create tray icon from bitmap, using fallback:', e.message);
-    // Fallback: generate a 1x1 blue PNG via data URL
-    const fallback = nativeImage.createEmpty();
-    return fallback;
+    console.error('Failed to copy to clipboard', e);
   }
+
+  return currentId;
 }
+
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -129,7 +97,7 @@ function createWindow() {
     show: !isHostMode // Hidden if host mode
   });
 
-  // In host mode, hide to tray instead of quitting when the window is closed
+  // In host mode, hide in background instead of quitting when the window is closed
   if (isHostMode) {
     mainWindow.on('close', (event) => {
       if (!isQuiting) {
@@ -150,19 +118,6 @@ function createWindow() {
 app.whenReady().then(() => {
   if (isHostMode) {
     startPythonServer();
-    
-    // Create Tray Icon with a proper bitmap icon (not SVG)
-    const icon = createTrayIcon();
-    
-    tray = new Tray(icon);
-    const contextMenu = Menu.buildFromTemplate([
-      { label: 'Host is Running', enabled: false },
-      { type: 'separator' },
-      { label: 'Show Window', click: () => { if (mainWindow) mainWindow.show(); } },
-      { label: 'Quit', click: () => { isQuiting = true; app.quit(); } }
-    ]);
-    tray.setToolTip('Omniscreen (Host)');
-    tray.setContextMenu(contextMenu);
   }
 
   createWindow();
