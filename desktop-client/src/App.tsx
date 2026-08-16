@@ -219,10 +219,10 @@ function App() {
         }
         console.log("Captured video track:", videoTracks[0].label, "enabled:", videoTracks[0].enabled);
         
-        // Hint the encoder to prioritize motion/framerate over detail
+        // Hint the encoder to prioritize detail/sharpness for remote desktop text
         videoTracks.forEach(track => {
           if ('contentHint' in track) {
-            track.contentHint = 'motion';
+            track.contentHint = 'detail';
           }
         });
         
@@ -238,10 +238,10 @@ function App() {
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps sweet spot
+            params.encodings[0].maxBitrate = 8000000; // 8 Mbps for crisp 1080p
             params.encodings[0].maxFramerate = 60;
             // @ts-ignore — degradationPreference is valid but not in all TS defs
-            params.degradationPreference = 'balanced';
+            params.degradationPreference = 'maintain-resolution';
             try {
               await sender.setParameters(params);
             } catch (e) {

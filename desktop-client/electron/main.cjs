@@ -18,7 +18,8 @@ function startPythonServer() {
   const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
   
   try {
-    pythonProcess = spawn(pythonCmd, [scriptPath], {
+    // Add -u flag to ensure unbuffered I/O (zero latency)
+    pythonProcess = spawn(pythonCmd, ['-u', scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
     

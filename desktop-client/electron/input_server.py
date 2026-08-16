@@ -187,7 +187,10 @@ if __name__ == "__main__":
     mode = "ctypes/Win32 API" if IS_WINDOWS else "pyautogui"
     print(f"Input server started. Mode: {mode}", file=sys.stderr, flush=True)
 
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
         line = line.strip()
         if not line:
             continue
