@@ -50,6 +50,9 @@ function App() {
   const rafId = useRef<number | null>(null);
   const pendingMouse = useRef<{x: number, y: number} | null>(null);
   const lastMouseTime = useRef<number>(0);
+  // Host-side: coalesce incoming mouse moves before dispatching to Electron IPC
+  const hostPendingMouse = useRef<{x: number, y: number} | null>(null);
+  const hostMouseRafId = useRef<number | null>(null);
 
   const cleanupSession = useCallback(() => {
     // Clear connection timeout
@@ -75,12 +78,17 @@ function App() {
     }
     remoteStreamRef.current = null;
     
-    // Cancel any pending mouse move animation frame
+    // Cancel any pending mouse move animation frames (both viewer and host side)
     if (rafId.current) {
       cancelAnimationFrame(rafId.current);
       rafId.current = null;
     }
     pendingMouse.current = null;
+    if (hostMouseRafId.current) {
+      cancelAnimationFrame(hostMouseRafId.current);
+      hostMouseRafId.current = null;
+    }
+    hostPendingMouse.current = null;
     
     pendingCandidatesRef.current = [];
     setStatus("disconnected");
@@ -91,9 +99,27 @@ function App() {
     if (!window.electronAPI) return;
     try {
       if (cmd.type === "mousemove") {
-        // @ts-ignore
-        window.electronAPI.mouseMove(cmd.x, cmd.y);
+        // ─── HOST-SIDE MOUSE COALESCING ───
+        // Buffer the latest position and dispatch via RAF.
+        // If 10 mousemove messages arrive in one tick, only the last executes.
+        hostPendingMouse.current = { x: cmd.x, y: cmd.y };
+        if (!hostMouseRafId.current) {
+          hostMouseRafId.current = requestAnimationFrame(() => {
+            hostMouseRafId.current = null;
+            if (hostPendingMouse.current) {
+              // @ts-ignore
+              window.electronAPI.mouseMove(hostPendingMouse.current.x, hostPendingMouse.current.y);
+              hostPendingMouse.current = null;
+            }
+          });
+        }
       } else if (cmd.type === "mousedown") {
+        // Flush pending mouse position before click for accuracy
+        if (hostPendingMouse.current) {
+          // @ts-ignore
+          window.electronAPI.mouseMove(hostPendingMouse.current.x, hostPendingMouse.current.y);
+          hostPendingMouse.current = null;
+        }
         // @ts-ignore
         window.electronAPI.mouseDown(cmd.button);
       } else if (cmd.type === "mouseup") {
@@ -540,6 +566,23 @@ function App() {
     }
   }, []);
 
+  // ─── RAF-BATCHED MOUSE SEND (VIEWER SIDE) ───
+  // Instead of sending every mousemove event individually (which floods the data channel),
+  // buffer the latest position and send exactly once per animation frame.
+  // This naturally aligns with the display refresh rate (60Hz/120Hz).
+  const sendMouseRAF = useCallback((x: number, y: number) => {
+    pendingMouse.current = { x, y };
+    if (!rafId.current) {
+      rafId.current = requestAnimationFrame(() => {
+        rafId.current = null;
+        if (pendingMouse.current && dataChannel.current && dataChannel.current.readyState === "open") {
+          dataChannel.current.send(JSON.stringify({ type: "mousemove", x: pendingMouse.current.x, y: pendingMouse.current.y }));
+          pendingMouse.current = null;
+        }
+      });
+    }
+  }, []);
+
   // Convert mouse position from video element to host screen coordinates,
   // accounting for object-contain letterboxing/pillarboxing
   const getHostCoords = useCallback((e: React.MouseEvent<HTMLVideoElement>): {x: number, y: number} | null => {
@@ -583,20 +626,30 @@ function App() {
     const coords = getHostCoords(e);
     if (!coords) return;
 
-    // High-frequency throttle (2ms ~ 500Hz) to prevent flooding while keeping zero perceived latency
-    const now = Date.now();
-    if (now - lastMouseTime.current >= 2) {
-      sendControl({ type: "mousemove", ...coords });
+    // ─── RAF-BATCHED MOUSE MOVE ───
+    // Buffer the latest position and send once per animation frame.
+    // Uses performance.now() (microsecond precision) instead of Date.now() (16ms on Windows).
+    // The RAF batching naturally limits to display refresh rate, so the time check
+    // is just a safety net to prevent duplicate sends within the same frame.
+    const now = performance.now();
+    if (now - lastMouseTime.current >= 1) {
+      sendMouseRAF(coords.x, coords.y);
       lastMouseTime.current = now;
     }
-  }, [getHostCoords, sendControl]);
+  }, [getHostCoords, sendMouseRAF]);
 
   const handleMouseClick = useCallback((e: React.MouseEvent<HTMLVideoElement>, type: "down" | "up") => {
-    // Send an immediate position update before the click so the cursor
-    // is at the exact right spot (in case the last mousemove was throttled)
+    // Flush any RAF-pending mouse position IMMEDIATELY before the click
+    // so the cursor is at the exact right spot
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
     const coords = getHostCoords(e);
     if (coords) {
+      // Send position synchronously (bypass RAF) to guarantee it arrives before the click
       sendControl({ type: "mousemove", ...coords });
+      pendingMouse.current = null;
     }
     let button = "left";
     if (e.button === 1) button = "middle";

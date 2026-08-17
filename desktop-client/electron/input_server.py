@@ -225,41 +225,63 @@ else:
 scroll_accum_x = 0.0
 scroll_accum_y = 0.0
 
-def process_command(cmd_str):
+def parse_command(cmd_str):
+    """Parse a command string. Supports compact 'm x y' for mouse moves (zero-overhead)
+    and standard JSON for everything else."""
+    # Fast path: compact mouse move format "m x y"
+    if cmd_str.startswith('m '):
+        parts = cmd_str.split(' ', 2)
+        if len(parts) == 3:
+            try:
+                return {"type": "mousemove", "x": int(parts[1]), "y": int(parts[2])}
+            except ValueError:
+                pass
+    # Standard JSON path for all other commands
+    return json.loads(cmd_str)
+
+def execute_command(cmd):
+    """Execute a parsed command dict."""
     global scroll_accum_x, scroll_accum_y
-    try:
-        cmd = json.loads(cmd_str)
-        action = cmd.get("type")
+    action = cmd.get("type")
 
-        if action == "mousemove":
-            x, y = cmd.get("x"), cmd.get("y")
-            if x is not None and y is not None:
-                mouse_move(x, y)
+    if action == "mousemove":
+        x, y = cmd.get("x"), cmd.get("y")
+        if x is not None and y is not None:
+            mouse_move(x, y)
 
-        elif action == "mousedown":
-            mouse_down(cmd.get("button", "left"))
+    elif action == "mousedown":
+        mouse_down(cmd.get("button", "left"))
 
-        elif action == "mouseup":
-            mouse_up(cmd.get("button", "left"))
+    elif action == "mouseup":
+        mouse_up(cmd.get("button", "left"))
 
-        elif action == "keydown":
-            key_down(cmd.get("key", ""))
+    elif action == "keydown":
+        key_down(cmd.get("key", ""))
 
-        elif action == "keyup":
-            key_up(cmd.get("key", ""))
+    elif action == "keyup":
+        key_up(cmd.get("key", ""))
 
-        elif action == "scroll":
-            scroll_wheel(cmd.get("deltaX", 0), cmd.get("deltaY", 0))
+    elif action == "scroll":
+        scroll_wheel(cmd.get("deltaX", 0), cmd.get("deltaY", 0))
 
-    except json.JSONDecodeError:
-        print(f"Invalid JSON: {cmd_str}", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"Error processing command: {e}", file=sys.stderr, flush=True)
+
+# ──── Non-blocking stdin peek (platform-specific) ────
+if IS_WINDOWS:
+    import msvcrt
+    def stdin_has_data():
+        """Check if stdin has more data waiting (non-blocking)."""
+        return msvcrt.kbhit()
+else:
+    import select as _select
+    def stdin_has_data():
+        """Check if stdin has more data waiting (non-blocking)."""
+        r, _, _ = _select.select([sys.stdin], [], [], 0)
+        return bool(r)
 
 
 if __name__ == "__main__":
     mode = "ctypes/Win32 API" if IS_WINDOWS else "pyautogui"
-    print(f"Input server started. Mode: {mode}", file=sys.stderr, flush=True)
+    print(f"Input server started (coalescing enabled). Mode: {mode}", file=sys.stderr, flush=True)
 
     while True:
         line = sys.stdin.readline()
@@ -271,4 +293,44 @@ if __name__ == "__main__":
         if line == "QUIT":
             print("Input server shutting down.", file=sys.stderr, flush=True)
             break
-        process_command(line)
+
+        try:
+            cmd = parse_command(line)
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Parse error: {e} for: {line}", file=sys.stderr, flush=True)
+            continue
+
+        # ─── MOUSE MOVE COALESCING ───
+        # If this is a mouse move AND there's more data in stdin,
+        # keep reading and only execute the LAST mouse position.
+        # Non-mouse commands are always executed immediately in order.
+        if cmd.get("type") == "mousemove":
+            latest_mouse = cmd
+            # Drain all pending lines, coalescing mouse moves
+            while stdin_has_data():
+                next_line = sys.stdin.readline()
+                if not next_line:
+                    break
+                next_line = next_line.strip()
+                if not next_line:
+                    continue
+                if next_line == "QUIT":
+                    print("Input server shutting down.", file=sys.stderr, flush=True)
+                    sys.exit(0)
+                try:
+                    next_cmd = parse_command(next_line)
+                except Exception:
+                    continue
+                if next_cmd.get("type") == "mousemove":
+                    # Replace with newer position — skip the old one
+                    latest_mouse = next_cmd
+                else:
+                    # Non-mouse command: execute the latest mouse FIRST, then this command
+                    execute_command(latest_mouse)
+                    latest_mouse = None
+                    execute_command(next_cmd)
+            # Execute the final coalesced mouse position
+            if latest_mouse:
+                execute_command(latest_mouse)
+        else:
+            execute_command(cmd)

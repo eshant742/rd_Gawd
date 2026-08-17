@@ -225,7 +225,7 @@ ipcMain.handle('GET_SOURCES', async () => {
   }
 });
 
-// Helper to send command to Python
+// Helper to send command to Python (standard JSON path for non-mouse commands)
 function sendToPython(cmdObj) {
   if (pythonProcess && !pythonProcess.killed) {
     try {
@@ -236,12 +236,43 @@ function sendToPython(cmdObj) {
   }
 }
 
+// ─── MOUSE MOVE COALESCING ───
+// Buffer the latest mouse position and flush once per event loop tick via setImmediate.
+// This collapses N mouse moves arriving in a single tick into 1 write to Python.
+// Uses compact "m x y\n" format instead of JSON for ~10x faster parsing on the Python side.
+let pendingMouseX = null;
+let pendingMouseY = null;
+let mouseFlushScheduled = false;
+
+function flushMouse() {
+  mouseFlushScheduled = false;
+  if (pendingMouseX !== null && pythonProcess && !pythonProcess.killed) {
+    try {
+      pythonProcess.stdin.write(`m ${pendingMouseX} ${pendingMouseY}\n`);
+    } catch (err) {
+      console.error('Error sending mouse to Python:', err);
+    }
+    pendingMouseX = null;
+    pendingMouseY = null;
+  }
+}
+
 // IPC Handlers for Remote Control
 ipcMain.on('MOUSE_MOVE', (event, { x, y }) => {
-  sendToPython({ type: "mousemove", x: Math.round(x), y: Math.round(y) });
+  // Coalesce: just update the pending position, flush on next tick
+  pendingMouseX = Math.round(x);
+  pendingMouseY = Math.round(y);
+  if (!mouseFlushScheduled) {
+    mouseFlushScheduled = true;
+    setImmediate(flushMouse);
+  }
 });
 
 ipcMain.on('MOUSE_DOWN', (event, { button }) => {
+  // Flush any pending mouse position BEFORE the click (so cursor is at the right spot)
+  if (pendingMouseX !== null) {
+    flushMouse();
+  }
   sendToPython({ type: "mousedown", button });
 });
 
@@ -250,6 +281,10 @@ ipcMain.on('MOUSE_UP', (event, { button }) => {
 });
 
 ipcMain.on('KEY_DOWN', (event, { key }) => {
+  // Flush pending mouse before keyboard events to maintain correct ordering
+  if (pendingMouseX !== null) {
+    flushMouse();
+  }
   sendToPython({ type: "keydown", key });
 });
 
@@ -261,3 +296,4 @@ ipcMain.on('KEY_UP', (event, { key }) => {
 ipcMain.on('SCROLL_WHEEL', (event, { deltaX, deltaY }) => {
   sendToPython({ type: "scroll", deltaX: Math.round(deltaX), deltaY: Math.round(deltaY) });
 });
+
