@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
-import { Key, MonitorPlay, XCircle, Copy, Check, Loader2, WifiOff, Wifi } from "lucide-react";
+import { Key, MonitorPlay, XCircle, Copy, Check, Loader2, WifiOff, Wifi, Lock } from "lucide-react";
 
 // ─── LOW-LATENCY ICE CONFIG ───
 // Prioritize direct P2P, keep only UDP TURN as fallback, remove TCP TURN (head-of-line blocking)
@@ -36,6 +36,7 @@ function App() {
   const [errorMsg, setErrorMsg] = useState("");
   const [copied, setCopied] = useState(false);
   const [signalingConnected, setSignalingConnected] = useState(false);
+  const [isControlEnabled, setIsControlEnabled] = useState(true);
 
   const socketRef = useRef<Socket | null>(null);
   const peerConnection = useRef<RTCPeerConnection | null>(null);
@@ -99,6 +100,9 @@ function App() {
       } else if (cmd.type === "scroll") {
         // @ts-ignore
         window.electronAPI.scrollWheel(cmd.deltaX, cmd.deltaY);
+      } else if (cmd.type === "special_key") {
+        // @ts-ignore
+        window.electronAPI.specialKey(cmd.command);
       }
     } catch (e) {
       console.error("Failed to execute command", e);
@@ -449,6 +453,15 @@ function App() {
 
     initMode();
 
+    // Listen for Panic Key toggles (Host Mode)
+    // @ts-ignore
+    if (window.electronAPI && window.electronAPI.onControlStateChanged) {
+      // @ts-ignore
+      window.electronAPI.onControlStateChanged((enabled: boolean) => {
+        setIsControlEnabled(enabled);
+      });
+    }
+
     return () => {
       isMounted = false;
       if (socketRef.current) {
@@ -711,6 +724,13 @@ function App() {
           )}
         </div>
         
+        {!isControlEnabled && (
+          <div className="bg-red-500/20 text-red-400 border border-red-500/50 px-4 py-2 rounded-lg mt-4 font-bold flex items-center gap-2 relative z-10 animate-pulse">
+            <XCircle size={18} />
+            Remote Control Disabled (F12)
+          </div>
+        )}
+        
         <p className="text-sm text-slate-500 mt-8 relative z-10">You can close this window. The host will stay active in the tray.</p>
       </div>
     );
@@ -726,8 +746,18 @@ function App() {
         onKeyUp={handleKeyUp}
       >
         <div className="absolute top-0 left-1/2 -translate-x-1/2 z-50 glass-panel px-6 py-2 rounded-b-xl flex gap-4 items-center opacity-0 hover:opacity-100 transition-opacity duration-300">
-           <span className="text-sm font-medium text-white">Viewing Remote Desk</span>
-           <button onClick={cleanupSession} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white p-2 rounded-full transition-colors">
+           <span className="text-sm font-medium text-white mr-4">Viewing Remote Desk</span>
+           
+           <button 
+             onClick={() => sendControl({ type: "special_key", command: "lock" })}
+             className="bg-slate-700/50 hover:bg-slate-600 text-white text-sm px-3 py-1.5 rounded-lg flex items-center gap-2 transition-colors"
+             title="Send Win+L (Lock Remote PC)"
+           >
+             <Lock size={14} />
+             Lock Host
+           </button>
+
+           <button onClick={cleanupSession} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white p-2 rounded-full transition-colors ml-2" title="Disconnect">
              <XCircle size={20} />
            </button>
         </div>

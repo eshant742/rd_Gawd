@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, clipboard, globalShortcut, Notification } = require('electron');
 
 // ─── EXTREME LOW-LATENCY: Chromium engine flags ───
 // All switches must be set BEFORE app.whenReady() to take effect.
@@ -156,9 +156,31 @@ function createWindow() {
   }
 }
 
+let isControlEnabled = true;
+
 app.whenReady().then(() => {
   if (isHostMode) {
     startPythonServer();
+
+    // ─── HOST OVERRIDE (PANIC KEY) ───
+    globalShortcut.register('F12', () => {
+      isControlEnabled = !isControlEnabled;
+      const statusText = isControlEnabled ? "Remote Control ENABLED" : "Remote Control DISABLED";
+      
+      // Notify the Host's renderer to update UI if needed
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('CONTROL_STATE_CHANGED', isControlEnabled);
+      }
+
+      // Show native OS notification so the host knows they are safe
+      new Notification({
+        title: 'Omniscreen',
+        body: statusText,
+        silent: true
+      }).show();
+      
+      console.log(`[Host Panic Key] ${statusText}`);
+    });
   }
 
   createWindow();
@@ -259,6 +281,7 @@ function flushMouse() {
 
 // IPC Handlers for Remote Control
 ipcMain.on('MOUSE_MOVE', (event, { x, y }) => {
+  if (!isControlEnabled) return;
   // Coalesce: just update the pending position, flush on next tick
   pendingMouseX = Math.round(x);
   pendingMouseY = Math.round(y);
@@ -269,6 +292,7 @@ ipcMain.on('MOUSE_MOVE', (event, { x, y }) => {
 });
 
 ipcMain.on('MOUSE_DOWN', (event, { button }) => {
+  if (!isControlEnabled) return;
   // Flush any pending mouse position BEFORE the click (so cursor is at the right spot)
   if (pendingMouseX !== null) {
     flushMouse();
@@ -277,10 +301,12 @@ ipcMain.on('MOUSE_DOWN', (event, { button }) => {
 });
 
 ipcMain.on('MOUSE_UP', (event, { button }) => {
+  if (!isControlEnabled) return;
   sendToPython({ type: "mouseup", button });
 });
 
 ipcMain.on('KEY_DOWN', (event, { key }) => {
+  if (!isControlEnabled) return;
   // Flush pending mouse before keyboard events to maintain correct ordering
   if (pendingMouseX !== null) {
     flushMouse();
@@ -289,11 +315,18 @@ ipcMain.on('KEY_DOWN', (event, { key }) => {
 });
 
 ipcMain.on('KEY_UP', (event, { key }) => {
+  if (!isControlEnabled) return;
   sendToPython({ type: "keyup", key });
 });
 
 // Scroll wheel support
 ipcMain.on('SCROLL_WHEEL', (event, { deltaX, deltaY }) => {
+  if (!isControlEnabled) return;
   sendToPython({ type: "scroll", deltaX: Math.round(deltaX), deltaY: Math.round(deltaY) });
+});
+
+ipcMain.on('SPECIAL_KEY', (event, { command }) => {
+  if (!isControlEnabled) return;
+  sendToPython({ type: "special_key", command });
 });
 

@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   keyDown: (key) => ipcRenderer.send('KEY_DOWN', { key }),
   keyUp: (key) => ipcRenderer.send('KEY_UP', { key }),
   scrollWheel: (deltaX, deltaY) => ipcRenderer.send('SCROLL_WHEEL', { deltaX, deltaY }),
+  specialKey: (command) => ipcRenderer.send('SPECIAL_KEY', { command }),
+  onControlStateChanged: (callback) => ipcRenderer.on('CONTROL_STATE_CHANGED', (_event, value) => callback(value)),
 });

@@ -264,6 +264,14 @@ def execute_command(cmd):
     elif action == "scroll":
         scroll_wheel(cmd.get("deltaX", 0), cmd.get("deltaY", 0))
 
+    elif action == "special_key":
+        command = cmd.get("command")
+        if command == "lock":
+            if IS_WINDOWS:
+                ctypes.windll.user32.LockWorkStation()
+            else:
+                pass # Not supported yet
+
 
 # ──── Background Reader Thread (for proper pipe peeking/coalescing) ────
 import threading
