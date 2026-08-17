@@ -241,12 +241,10 @@ function App() {
         }
         console.log("Captured video track:", videoTracks[0].label, "enabled:", videoTracks[0].enabled);
         
-        // Hint the encoder to prioritize immediate frame delivery at full framerate
-        // 'motion' = send frames ASAP, sacrifice sharpness during fast motion
-        // 'detail' = buffer frames for text sharpness — adds significant latency
+        // Hint the encoder to prioritize sharpness of text/UI
         videoTracks.forEach(track => {
           if ('contentHint' in track) {
-            track.contentHint = 'motion';
+            track.contentHint = 'detail';
           }
         });
         
@@ -264,8 +262,8 @@ function App() {
             }
             params.encodings[0].maxBitrate = 8000000; // 8 Mbps — sweet spot for 1080p60 without network congestion
             params.encodings[0].maxFramerate = 60;
-            // @ts-ignore — degradationPreference is valid but not in all TS defs
-            params.degradationPreference = 'maintain-framerate'; // Drops resolution over dropping frames for smooth motion
+            // @ts-ignore
+            params.degradationPreference = 'maintain-resolution'; // Drop frames instead of blurring the screen
             try {
               await sender.setParameters(params);
             } catch (e) {
@@ -727,7 +725,7 @@ function App() {
         {!isControlEnabled && (
           <div className="bg-red-500/20 text-red-400 border border-red-500/50 px-4 py-2 rounded-lg mt-4 font-bold flex items-center gap-2 relative z-10 animate-pulse">
             <XCircle size={18} />
-            Remote Control Disabled (F12)
+            Remote Control Disabled (Ctrl+Alt+X)
           </div>
         )}
         
@@ -779,7 +777,7 @@ function App() {
           onMouseDown={(e) => handleMouseClick(e, "down")}
           onMouseUp={(e) => handleMouseClick(e, "up")}
           onContextMenu={(e) => e.preventDefault()}
-          className="w-full h-full object-contain"
+          className="w-full h-full object-contain cursor-none"
           style={{ background: '#000', willChange: 'transform' }}  // GPU compositor layer promotion
         />
       </div>
