@@ -47,8 +47,6 @@ function App() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const modeRef = useRef<string>("viewer");
   const myIdRef = useRef<string>("");
-  const rafId = useRef<number | null>(null);
-  const pendingMouse = useRef<{x: number, y: number} | null>(null);
   const lastMouseTime = useRef<number>(0);
 
   const cleanupSession = useCallback(() => {
@@ -74,13 +72,6 @@ function App() {
       remoteVideoRef.current.srcObject = null;
     }
     remoteStreamRef.current = null;
-    
-    // Cancel any pending mouse move animation frames (viewer side)
-    if (rafId.current) {
-      cancelAnimationFrame(rafId.current);
-      rafId.current = null;
-    }
-    pendingMouse.current = null;
     
     pendingCandidatesRef.current = [];
     setStatus("disconnected");
@@ -540,23 +531,6 @@ function App() {
     }
   }, []);
 
-  // ─── RAF-BATCHED MOUSE SEND (VIEWER SIDE) ───
-  // Instead of sending every mousemove event individually (which floods the data channel),
-  // buffer the latest position and send exactly once per animation frame.
-  // This naturally aligns with the display refresh rate (60Hz/120Hz).
-  const sendMouseRAF = useCallback((x: number, y: number) => {
-    pendingMouse.current = { x, y };
-    if (!rafId.current) {
-      rafId.current = requestAnimationFrame(() => {
-        rafId.current = null;
-        if (pendingMouse.current && dataChannel.current && dataChannel.current.readyState === "open") {
-          dataChannel.current.send(JSON.stringify({ type: "mousemove", x: pendingMouse.current.x, y: pendingMouse.current.y }));
-          pendingMouse.current = null;
-        }
-      });
-    }
-  }, []);
-
   // Convert mouse position from video element to host screen coordinates,
   // accounting for object-contain letterboxing/pillarboxing
   const getHostCoords = useCallback((e: React.MouseEvent<HTMLVideoElement>): {x: number, y: number} | null => {
@@ -600,30 +574,22 @@ function App() {
     const coords = getHostCoords(e);
     if (!coords) return;
 
-    // ─── RAF-BATCHED MOUSE MOVE ───
-    // Buffer the latest position and send once per animation frame.
-    // Uses performance.now() (microsecond precision) instead of Date.now() (16ms on Windows).
-    // The RAF batching naturally limits to display refresh rate, so the time check
-    // is just a safety net to prevent duplicate sends within the same frame.
+    // ─── DIRECT ULTRA-LOW LATENCY SEND ───
+    // Instead of waiting for requestAnimationFrame (which adds up to 16ms of delay),
+    // we send the coordinates instantly. We cap it at 4ms (250Hz) to prevent
+    // absolutely flooding the network, while keeping the feeling of 0ms latency.
     const now = performance.now();
-    if (now - lastMouseTime.current >= 1) {
-      sendMouseRAF(coords.x, coords.y);
+    if (now - lastMouseTime.current >= 4) {
+      sendControl({ type: "mousemove", ...coords });
       lastMouseTime.current = now;
     }
-  }, [getHostCoords, sendMouseRAF]);
+  }, [getHostCoords, sendControl]);
 
   const handleMouseClick = useCallback((e: React.MouseEvent<HTMLVideoElement>, type: "down" | "up") => {
-    // Flush any RAF-pending mouse position IMMEDIATELY before the click
-    // so the cursor is at the exact right spot
-    if (rafId.current) {
-      cancelAnimationFrame(rafId.current);
-      rafId.current = null;
-    }
     const coords = getHostCoords(e);
     if (coords) {
-      // Send position synchronously (bypass RAF) to guarantee it arrives before the click
+      // Send position synchronously to guarantee it arrives before the click
       sendControl({ type: "mousemove", ...coords });
-      pendingMouse.current = null;
     }
     let button = "left";
     if (e.button === 1) button = "middle";
@@ -783,7 +749,7 @@ function App() {
           onMouseDown={(e) => handleMouseClick(e, "down")}
           onMouseUp={(e) => handleMouseClick(e, "up")}
           onContextMenu={(e) => e.preventDefault()}
-          className="w-full h-full object-contain cursor-none"
+          className="w-full h-full object-contain"
           style={{ background: '#000', willChange: 'transform' }}  // GPU compositor layer promotion
         />
       </div>
