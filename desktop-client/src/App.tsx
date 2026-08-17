@@ -50,9 +50,6 @@ function App() {
   const rafId = useRef<number | null>(null);
   const pendingMouse = useRef<{x: number, y: number} | null>(null);
   const lastMouseTime = useRef<number>(0);
-  // Host-side: coalesce incoming mouse moves before dispatching to Electron IPC
-  const hostPendingMouse = useRef<{x: number, y: number} | null>(null);
-  const hostMouseRafId = useRef<number | null>(null);
 
   const cleanupSession = useCallback(() => {
     // Clear connection timeout
@@ -78,17 +75,12 @@ function App() {
     }
     remoteStreamRef.current = null;
     
-    // Cancel any pending mouse move animation frames (both viewer and host side)
+    // Cancel any pending mouse move animation frames (viewer side)
     if (rafId.current) {
       cancelAnimationFrame(rafId.current);
       rafId.current = null;
     }
     pendingMouse.current = null;
-    if (hostMouseRafId.current) {
-      cancelAnimationFrame(hostMouseRafId.current);
-      hostMouseRafId.current = null;
-    }
-    hostPendingMouse.current = null;
     
     pendingCandidatesRef.current = [];
     setStatus("disconnected");
@@ -99,27 +91,9 @@ function App() {
     if (!window.electronAPI) return;
     try {
       if (cmd.type === "mousemove") {
-        // ─── HOST-SIDE MOUSE COALESCING ───
-        // Buffer the latest position and dispatch via RAF.
-        // If 10 mousemove messages arrive in one tick, only the last executes.
-        hostPendingMouse.current = { x: cmd.x, y: cmd.y };
-        if (!hostMouseRafId.current) {
-          hostMouseRafId.current = requestAnimationFrame(() => {
-            hostMouseRafId.current = null;
-            if (hostPendingMouse.current) {
-              // @ts-ignore
-              window.electronAPI.mouseMove(hostPendingMouse.current.x, hostPendingMouse.current.y);
-              hostPendingMouse.current = null;
-            }
-          });
-        }
+        // @ts-ignore
+        window.electronAPI.mouseMove(cmd.x, cmd.y);
       } else if (cmd.type === "mousedown") {
-        // Flush pending mouse position before click for accuracy
-        if (hostPendingMouse.current) {
-          // @ts-ignore
-          window.electronAPI.mouseMove(hostPendingMouse.current.x, hostPendingMouse.current.y);
-          hostPendingMouse.current = null;
-        }
         // @ts-ignore
         window.electronAPI.mouseDown(cmd.button);
       } else if (cmd.type === "mouseup") {

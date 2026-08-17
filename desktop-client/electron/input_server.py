@@ -265,32 +265,37 @@ def execute_command(cmd):
         scroll_wheel(cmd.get("deltaX", 0), cmd.get("deltaY", 0))
 
 
-# ──── Non-blocking stdin peek (platform-specific) ────
-if IS_WINDOWS:
-    import msvcrt
-    def stdin_has_data():
-        """Check if stdin has more data waiting (non-blocking)."""
-        return msvcrt.kbhit()
-else:
-    import select as _select
-    def stdin_has_data():
-        """Check if stdin has more data waiting (non-blocking)."""
-        r, _, _ = _select.select([sys.stdin], [], [], 0)
-        return bool(r)
+# ──── Background Reader Thread (for proper pipe peeking/coalescing) ────
+import threading
+import queue
 
-
-if __name__ == "__main__":
-    mode = "ctypes/Win32 API" if IS_WINDOWS else "pyautogui"
-    print(f"Input server started (coalescing enabled). Mode: {mode}", file=sys.stderr, flush=True)
-
+def reader_thread(q):
+    """Continuously reads from stdin and puts lines into the queue."""
     while True:
         line = sys.stdin.readline()
         if not line:
+            q.put(None)  # EOF marker
             break
         line = line.strip()
-        if not line:
-            continue
-        if line == "QUIT":
+        if line:
+            q.put(line)
+
+if __name__ == "__main__":
+    mode = "ctypes/Win32 API" if IS_WINDOWS else "pyautogui"
+    print(f"Input server started (robust coalescing enabled). Mode: {mode}", file=sys.stderr, flush=True)
+
+    cmd_queue = queue.Queue()
+    t = threading.Thread(target=reader_thread, args=(cmd_queue,), daemon=True)
+    t.start()
+
+    while True:
+        try:
+            # Block until we get at least one command
+            line = cmd_queue.get(block=True)
+        except KeyboardInterrupt:
+            break
+
+        if line is None or line == "QUIT":
             print("Input server shutting down.", file=sys.stderr, flush=True)
             break
 
@@ -301,34 +306,36 @@ if __name__ == "__main__":
             continue
 
         # ─── MOUSE MOVE COALESCING ───
-        # If this is a mouse move AND there's more data in stdin,
-        # keep reading and only execute the LAST mouse position.
-        # Non-mouse commands are always executed immediately in order.
         if cmd.get("type") == "mousemove":
             latest_mouse = cmd
-            # Drain all pending lines, coalescing mouse moves
-            while stdin_has_data():
-                next_line = sys.stdin.readline()
-                if not next_line:
+            # Drain all pending lines in the queue instantly
+            while True:
+                try:
+                    next_line = cmd_queue.get_nowait()
+                except queue.Empty:
                     break
-                next_line = next_line.strip()
-                if not next_line:
-                    continue
-                if next_line == "QUIT":
+                
+                if next_line is None or next_line == "QUIT":
+                    if latest_mouse:
+                        execute_command(latest_mouse)
                     print("Input server shutting down.", file=sys.stderr, flush=True)
                     sys.exit(0)
+                    
                 try:
                     next_cmd = parse_command(next_line)
                 except Exception:
                     continue
+                    
                 if next_cmd.get("type") == "mousemove":
                     # Replace with newer position — skip the old one
                     latest_mouse = next_cmd
                 else:
                     # Non-mouse command: execute the latest mouse FIRST, then this command
-                    execute_command(latest_mouse)
-                    latest_mouse = None
+                    if latest_mouse:
+                        execute_command(latest_mouse)
+                        latest_mouse = None
                     execute_command(next_cmd)
+                    
             # Execute the final coalesced mouse position
             if latest_mouse:
                 execute_command(latest_mouse)
