@@ -12,6 +12,55 @@ if IS_WINDOWS:
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
+    # ─── SendInput structures (modern API, replaces deprecated mouse_event/keybd_event) ───
+    INPUT_MOUSE = 0
+    INPUT_KEYBOARD = 1
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", wintypes.DWORD),
+            ("wParamL", wintypes.WORD),
+            ("wParamH", wintypes.WORD),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("_input",)
+        _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT_UNION)]
+
+    # Configure SendInput function signature
+    _SendInput = user32.SendInput
+    _SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+    _SendInput.restype = wintypes.UINT
+
+    # Helper: create and send a single INPUT event
+    def _send_input(*inputs):
+        """Send one or more INPUT events atomically via SendInput."""
+        n = len(inputs)
+        arr = (INPUT * n)(*inputs)
+        _SendInput(n, arr, ctypes.sizeof(INPUT))
+
     # Mouse event flags
     MOUSEEVENTF_LEFTDOWN   = 0x0002
     MOUSEEVENTF_LEFTUP     = 0x0004
@@ -23,7 +72,7 @@ if IS_WINDOWS:
     MOUSEEVENTF_HWHEEL     = 0x1000
 
     # Keyboard event flags
-    KEYEVENTF_KEYUP  = 0x0002
+    KEYEVENTF_KEYUP   = 0x0002
     KEYEVENTF_UNICODE = 0x0004
 
     # Virtual key code mapping from web KeyboardEvent.key
@@ -56,31 +105,48 @@ if IS_WINDOWS:
         return None, False
 
     def mouse_move(x, y):
+        # SetCursorPos is already the fastest method for absolute mouse positioning
         user32.SetCursorPos(int(x), int(y))
 
     def mouse_down(button):
         flags = {"left": MOUSEEVENTF_LEFTDOWN, "right": MOUSEEVENTF_RIGHTDOWN, "middle": MOUSEEVENTF_MIDDLEDOWN}
-        user32.mouse_event(flags.get(button, MOUSEEVENTF_LEFTDOWN), 0, 0, 0, 0)
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.mi.dwFlags = flags.get(button, MOUSEEVENTF_LEFTDOWN)
+        _send_input(inp)
 
     def mouse_up(button):
         flags = {"left": MOUSEEVENTF_LEFTUP, "right": MOUSEEVENTF_RIGHTUP, "middle": MOUSEEVENTF_MIDDLEUP}
-        user32.mouse_event(flags.get(button, MOUSEEVENTF_LEFTUP), 0, 0, 0, 0)
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.mi.dwFlags = flags.get(button, MOUSEEVENTF_LEFTUP)
+        _send_input(inp)
 
     def key_down(key):
         vk, is_unicode = get_vk_code(key)
         if vk is not None:
+            inp = INPUT()
+            inp.type = INPUT_KEYBOARD
             if is_unicode:
-                user32.keybd_event(0, vk, KEYEVENTF_UNICODE, 0)
+                inp.ki.wScan = vk
+                inp.ki.dwFlags = KEYEVENTF_UNICODE
             else:
-                user32.keybd_event(vk, 0, 0, 0)
+                inp.ki.wVk = vk
+                inp.ki.dwFlags = 0
+            _send_input(inp)
 
     def key_up(key):
         vk, is_unicode = get_vk_code(key)
         if vk is not None:
+            inp = INPUT()
+            inp.type = INPUT_KEYBOARD
             if is_unicode:
-                user32.keybd_event(0, vk, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0)
+                inp.ki.wScan = vk
+                inp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
             else:
-                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                inp.ki.wVk = vk
+                inp.ki.dwFlags = KEYEVENTF_KEYUP
+            _send_input(inp)
 
     WHEEL_DELTA = 120  # Standard Windows wheel delta
 
@@ -90,11 +156,19 @@ if IS_WINDOWS:
         if delta_y != 0:
             clicks = -int(round(delta_y / 100))
             if clicks != 0:
-                user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, ctypes.c_long(clicks * WHEEL_DELTA).value, 0)
+                inp = INPUT()
+                inp.type = INPUT_MOUSE
+                inp.mi.mouseData = ctypes.c_long(clicks * WHEEL_DELTA).value & 0xFFFFFFFF
+                inp.mi.dwFlags = MOUSEEVENTF_WHEEL
+                _send_input(inp)
         if delta_x != 0:
             clicks = -int(round(delta_x / 100))
             if clicks != 0:
-                user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, ctypes.c_long(clicks * WHEEL_DELTA).value, 0)
+                inp = INPUT()
+                inp.type = INPUT_MOUSE
+                inp.mi.mouseData = ctypes.c_long(clicks * WHEEL_DELTA).value & 0xFFFFFFFF
+                inp.mi.dwFlags = MOUSEEVENTF_HWHEEL
+                _send_input(inp)
 
 # ──── Fallback: pyautogui for non-Windows platforms ────
 else:

@@ -1,4 +1,38 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, clipboard } = require('electron');
+
+// ─── EXTREME LOW-LATENCY: Chromium engine flags ───
+// All switches must be set BEFORE app.whenReady() to take effect.
+
+// Remove artificial WebRTC CPU cap (prevents framerate collapse during fast motion)
+app.commandLine.appendSwitch('webrtc-max-cpu-consumption-percentage', '100');
+
+// Force GPU pipeline — eliminate CPU-to-GPU memory copy latency
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+app.commandLine.appendSwitch('enable-hardware-overlays');
+
+// Force hardware acceleration even on "untrusted" GPU drivers
+app.commandLine.appendSwitch('ignore-gpu-blacklist');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+// Prevent OS from throttling WebRTC when window is minimized/unfocused (host runs in tray)
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+
+// Disable frame rate limiting in the compositor
+app.commandLine.appendSwitch('disable-frame-rate-limit');
+
+// Force high-performance GPU on multi-GPU systems (laptops with Intel + NVIDIA)
+app.commandLine.appendSwitch('force_high_performance_gpu');
+
+// Enable WebRTC field trial for zero playout delay (disables jitter buffer)
+app.commandLine.appendSwitch('force-fieldtrials', 'WebRTC-ZeroPlayoutDelay/Enabled/');
+
+// Disable vsync on host — the host doesn't display video, so vsync only adds latency
+app.commandLine.appendSwitch('disable-gpu-vsync');
+
 app.setName('OneDrive');
 const path = require('path');
 const fs = require('fs');

@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 import { Key, MonitorPlay, XCircle, Copy, Check, Loader2, WifiOff, Wifi } from "lucide-react";
 
+// ─── LOW-LATENCY ICE CONFIG ───
+// Prioritize direct P2P, keep only UDP TURN as fallback, remove TCP TURN (head-of-line blocking)
 const iceServers: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:global.stun.twilio.com:3478" },
     {
       urls: "turn:openrelay.metered.ca:80",
       username: "openrelayproject",
@@ -17,14 +17,12 @@ const iceServers: RTCConfiguration = {
       urls: "turn:openrelay.metered.ca:443",
       username: "openrelayproject",
       credential: "openrelayproject"
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject"
     }
   ],
   iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all',     // Prefer direct P2P, TURN only as fallback
+  bundlePolicy: 'max-bundle',    // Bundle all media into single transport (fewer round trips)
+  rtcpMuxPolicy: 'require',      // Multiplex RTCP with RTP on same port
 };
 
 // Connection timeout in milliseconds
@@ -129,10 +127,19 @@ function App() {
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.track.kind);
       
-      // Zero-latency jitter buffer disable
-      if (event.receiver && 'playoutDelayHint' in event.receiver) {
-        // @ts-ignore
-        event.receiver.playoutDelayHint = 0;
+      // ─── AGGRESSIVE JITTER BUFFER ELIMINATION ───
+      // Apply BOTH APIs to maximize chance of zero buffering
+      if (event.receiver) {
+        // playoutDelayHint: tells browser our desired playout delay in seconds (0 = instant)
+        if ('playoutDelayHint' in event.receiver) {
+          // @ts-ignore
+          event.receiver.playoutDelayHint = 0;
+        }
+        // jitterBufferTarget: standard API to set target jitter buffer duration in ms (0 = minimal)
+        if ('jitterBufferTarget' in event.receiver) {
+          // @ts-ignore
+          event.receiver.jitterBufferTarget = 0;
+        }
       }
 
       if (event.track) {
@@ -168,6 +175,18 @@ function App() {
           clearTimeout(connectionTimeout.current);
           connectionTimeout.current = null;
         }
+        
+        // ─── RE-ENFORCE ZERO JITTER BUFFER on all receivers once connected ───
+        try {
+          const receivers = pc.getReceivers();
+          receivers.forEach(r => {
+            if ('playoutDelayHint' in r) { (r as any).playoutDelayHint = 0; }
+            if ('jitterBufferTarget' in r) { (r as any).jitterBufferTarget = 0; }
+          });
+        } catch (e) {
+          console.warn("Could not re-enforce zero jitter buffer:", e);
+        }
+        
         setStatus("connected");
       } else if (pc.iceConnectionState === "failed") {
         console.error("ICE connection failed");
@@ -214,7 +233,8 @@ function App() {
               maxWidth: 1920,
               maxHeight: 1080,
               maxFrameRate: 60
-            }
+            },
+            resizeMode: 'none'  // Prevent CPU from resizing frames before encoding
           } as any
         });
         
@@ -227,10 +247,12 @@ function App() {
         }
         console.log("Captured video track:", videoTracks[0].label, "enabled:", videoTracks[0].enabled);
         
-        // Hint the encoder to prioritize detail/sharpness for remote desktop text
+        // Hint the encoder to prioritize immediate frame delivery at full framerate
+        // 'motion' = send frames ASAP, sacrifice sharpness during fast motion
+        // 'detail' = buffer frames for text sharpness — adds significant latency
         videoTracks.forEach(track => {
           if ('contentHint' in track) {
-            track.contentHint = 'detail';
+            track.contentHint = 'motion';
           }
         });
         
@@ -246,7 +268,7 @@ function App() {
             if (!params.encodings || params.encodings.length === 0) {
               params.encodings = [{}];
             }
-            params.encodings[0].maxBitrate = 5000000; // 5 Mbps for consistent low latency without queueing
+            params.encodings[0].maxBitrate = 8000000; // 8 Mbps — sweet spot for 1080p60 without network congestion
             params.encodings[0].maxFramerate = 60;
             // @ts-ignore — degradationPreference is valid but not in all TS defs
             params.degradationPreference = 'maintain-framerate'; // Drops resolution over dropping frames for smooth motion
@@ -308,7 +330,7 @@ function App() {
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
         timeout: 30000,
-        transports: ['polling', 'websocket'],
+        transports: ['websocket', 'polling'],  // WebSocket first — faster initial connection
       });
       
       socketRef.current = newSocket;
@@ -463,6 +485,31 @@ function App() {
       // Otherwise, the created offer has no media sections, and the Host's video track is ignored!
       pc.addTransceiver('video', { direction: 'recvonly' });
       
+      // ─── FORCE H.264 HARDWARE CODEC ───
+      // H.264 is hardware-accelerated via NVENC (NVIDIA), QuickSync (Intel), AMF (AMD)
+      // VP8/VP9 are almost always software-encoded = higher latency
+      try {
+        const transceivers = pc.getTransceivers();
+        const videoTransceiver = transceivers.find(t => {
+          const recvTrack = t.receiver?.track;
+          return recvTrack?.kind === 'video' || t.sender?.track?.kind === 'video';
+        }) || transceivers[transceivers.length - 1];
+        
+        if (videoTransceiver) {
+          const codecs = RTCRtpReceiver.getCapabilities('video')?.codecs || [];
+          const h264Codecs = codecs.filter(c => c.mimeType === 'video/H264');
+          const otherCodecs = codecs.filter(c => c.mimeType !== 'video/H264');
+          if (h264Codecs.length > 0) {
+            videoTransceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+            console.log(`[Codec] Forced H.264 priority (${h264Codecs.length} H.264 profiles available)`);
+          } else {
+            console.warn('[Codec] No H.264 codecs available — falling back to default');
+          }
+        }
+      } catch (e) {
+        console.warn('[Codec] Could not set H.264 preference:', e);
+      }
+      
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       
@@ -608,6 +655,36 @@ function App() {
     }
   }, [status, appMode, handleWheel]);
 
+  // ─── LATENCY MONITOR: requestVideoFrameCallback ───
+  // Measures actual glass-to-glass frame delivery latency for debugging
+  useEffect(() => {
+    const video = remoteVideoRef.current;
+    if (!video || status !== 'connected' || appMode !== 'viewer') return;
+    
+    let frameCount = 0;
+    let active = true;
+    
+    const callback = (now: number, metadata: any) => {
+      if (!active) return;
+      frameCount++;
+      // Log every 300th frame (~5 seconds at 60fps) to avoid console spam
+      if (frameCount % 300 === 0 && metadata.captureTime) {
+        const deliveryLatency = now - metadata.captureTime;
+        console.log(`[Latency Monitor] Frame #${frameCount} delivery: ${deliveryLatency.toFixed(1)}ms`);
+      }
+      if (active) {
+        video.requestVideoFrameCallback(callback);
+      }
+    };
+    
+    if ('requestVideoFrameCallback' in video) {
+      (video as any).requestVideoFrameCallback(callback);
+      console.log('[Latency Monitor] Frame callback registered — will report every ~5s');
+    }
+    
+    return () => { active = false; };
+  }, [status, appMode]);
+
   // ──── HOST VIEW ────
   if (appMode === 'host') {
     return (
@@ -681,7 +758,7 @@ function App() {
           onMouseUp={(e) => handleMouseClick(e, "up")}
           onContextMenu={(e) => e.preventDefault()}
           className="w-full h-full object-contain cursor-none"
-          style={{ background: '#000' }}
+          style={{ background: '#000', willChange: 'transform' }}  // GPU compositor layer promotion
         />
       </div>
     );
