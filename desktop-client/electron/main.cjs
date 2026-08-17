@@ -143,6 +143,11 @@ function createWindow() {
     });
   }
 
+  // FORWARD CONSOLE LOGS FOR DEBUGGING
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[Renderer]: ${message}`);
+  });
+
   const isDev = !app.isPackaged && process.env.VITE_DEV_SERVER_URL;
   if (isDev) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);

@@ -233,8 +233,7 @@ function App() {
               maxWidth: 1920,
               maxHeight: 1080,
               maxFrameRate: 60
-            },
-            resizeMode: 'none'  // Prevent CPU from resizing frames before encoding
+            }
           } as any
         });
         
