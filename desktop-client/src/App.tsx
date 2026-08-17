@@ -725,7 +725,7 @@ function App() {
         {!isControlEnabled && (
           <div className="bg-red-500/20 text-red-400 border border-red-500/50 px-4 py-2 rounded-lg mt-4 font-bold flex items-center gap-2 relative z-10 animate-pulse">
             <XCircle size={18} />
-            Remote Control Disabled (Ctrl+Alt+X)
+            Remote Control Disabled (Alt+Shift+Q)
           </div>
         )}
         

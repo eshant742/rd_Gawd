@@ -163,7 +163,7 @@ app.whenReady().then(() => {
     startPythonServer();
 
     // ─── HOST OVERRIDE (PANIC KEY) ───
-    globalShortcut.register('CommandOrControl+Alt+X', () => {
+    globalShortcut.register('Alt+Shift+Q', () => {
       isControlEnabled = !isControlEnabled;
       const statusText = isControlEnabled ? "Remote Control ENABLED" : "Remote Control DISABLED";
       
